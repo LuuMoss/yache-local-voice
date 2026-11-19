@@ -13,6 +13,40 @@ environment, a whisper model) happens only when you press a button in the
 panel. A missing engine returns control to the host with a clear
 diagnostic instead of substituting something else.
 
+## Installation
+
+A one-click install through the official Hermes plugin catalog is in the
+review queue; until it lands, use the manual route below (about one minute,
+no command line required). The engines ship as Windows x64 binaries.
+
+1. Download this repository (Code ▼ → **Download ZIP**, or `git clone`) and
+   unzip it anywhere.
+2. From the unzipped folder, copy everything **except** `desktop/`, `docs/`
+   and dot-files (so: `__init__.py`, `plugin.yaml`, `dashboard/`,
+   `vendor/`, `yache_engine/`, plus the license/changelog files) into a new
+   folder:
+   `%LOCALAPPDATA%\hermes\plugins\yache-local-voice\`
+   Check: `...\plugins\yache-local-voice\plugin.yaml` must exist.
+3. Copy the single file `desktop\plugin.js` to:
+   `%LOCALAPPDATA%\hermes\desktop-plugins\yache-local-voice\plugin.js`
+   (create the `yache-local-voice` folder if it does not exist — that one
+   file is the whole UI panel).
+4. **Quit the Hermes desktop app completely** and open it again. A full quit
+   reloads both the gateway plugin and the panel; closing the window or
+   pressing Ctrl+R is not enough.
+5. A new icon appears in the status bar — click it, then open the console.
+   Nothing is downloaded behind your back: press **Download model** on the
+   TTS tab to fetch the Qwen3-TTS GGUF weights; NVIDIA users can install the
+   CUDA acceleration pack (the GPU package in this repository's Releases,
+   `yache-cuda-windows-x64.zip`, fetched on demand) from the same tab; the
+   STT tab builds its own local transcription environment with one click.
+   The first synthesized sentence is the acceptance test — if you hear it,
+   everything downstream is wired correctly.
+
+For a source install the layout is identical: the repository root *is* the
+plugin body (skip `desktop/` and `docs/`), and `desktop/plugin.js` mirrors
+to `desktop-plugins/yache-local-voice/plugin.js`.
+
 ## Screenshots
 
 The one-glance status bar, the console doctor screen and the four settings pages:
