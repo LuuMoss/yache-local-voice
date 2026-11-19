@@ -13,6 +13,34 @@ environment, a whisper model) happens only when you press a button in the
 panel. A missing engine returns control to the host with a clear
 diagnostic instead of substituting something else.
 
+## Screenshots
+
+The one-glance status bar, the console doctor screen and the four settings pages:
+
+![QuickPanel — live status and one-click actions in the status bar](docs/screenshots/01-quickpanel-status.png)
+
+*QuickPanel: engine state, VRAM hint and quick actions, always one click away in the status bar.*
+
+![Console — overview home](docs/screenshots/02-console-home.png)
+
+*Console home: the doctor report — engine paths, versions and every health light in one screen.*
+
+![Console — TTS synthesis tab](docs/screenshots/03-panel-tts-synthesis.png)
+
+*TTS tab: pick a voice, type, listen — plus voice cloning in one click.*
+
+![Console — voice cloning tab](docs/screenshots/04-panel-voice-cloning.png)
+
+*Cloning tab: model download ladder, CUDA accelerator status, and building a new voice from a reference clip.*
+
+![Console — wake-word conversation tab](docs/screenshots/05-panel-wake-conversation.png)
+
+*Wake tab: tune the official sherpa-onnx keyword engine and hold full wake conversations.*
+
+![Console — speech-to-text tab](docs/screenshots/06-panel-stt-transcription.png)
+
+*STT tab: one-click build of the plugin-owned Python environment, offline transcription of files or microphone.*
+
 ## Disclosure (catalog rule 13)
 
 - **Config keys written by the dashboard panel** (through the official
