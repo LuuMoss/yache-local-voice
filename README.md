@@ -34,7 +34,13 @@ no command line required). The engines ship as Windows x64 binaries.
 4. **Quit the Hermes desktop app completely** and open it again. A full quit
    reloads both the gateway plugin and the panel; closing the window or
    pressing Ctrl+R is not enough.
-5. A new icon appears in the status bar — click it, then open the console.
+5. Open **Settings → Plugins** and switch the plugin on. Heads-up: a freshly
+   installed plugin usually does **not** show up in the default list view —
+   you have to type the full name `yache-local-voice` into the **search box**
+   at the top of the page; the entry (and its enable switch) only appears
+   through search. Toggle it on, then quit and reopen the app once more
+   (same as step 4) so the panel comes alive.
+6. A new icon appears in the status bar — click it, then open the console.
    Nothing is downloaded behind your back: press **Download model** on the
    TTS tab to fetch the Qwen3-TTS GGUF weights; NVIDIA users can install the
    CUDA acceleration pack (the GPU package in this repository's Releases,
