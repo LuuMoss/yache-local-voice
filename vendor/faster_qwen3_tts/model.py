@@ -10,7 +10,17 @@ from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 
 import numpy as np
 import soundfile as sf
-import torch
+try:
+    import torch  # CUDA-graph backend only; see _torch_placeholder below
+except ModuleNotFoundError:
+    # GGML-only install (the common case for this plugin's engine path):
+    # the module body still evaluates @torch.inference_mode() and
+    # torch.dtype/torch.bfloat16 in signatures at import time, so hand the
+    # name a placeholder that satisfies those and fails loudly on real
+    # tensor work.  A fresh Hermes desktop python ships without torch —
+    # gating the whole engine behind a ~200 MB import is not acceptable.
+    from . import _torch_placeholder as _tp
+    torch = _tp.make()
 
 from .utils import suppress_flash_attn_warning
 

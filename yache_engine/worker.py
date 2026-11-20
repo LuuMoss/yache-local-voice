@@ -144,9 +144,31 @@ def _per_digit(s):
 
 _NUM_RE = re.compile(r"\d+(?:\.\d+)?")
 
+# Non-Chinese context gate (2026-11-20, owner: the plugin ships worldwide and
+# foreign users read aloud in English). normalize_times/units/numbers INJECT
+# hanzi ("12" -> "十二"); inside a latin sentence that breaks the reading — the
+# engine pronounces injected hanzi with Chinese phonemes, while Qwen3-TTS's own
+# text frontend already reads latin-context digits correctly ("5ms" -> "five
+# milliseconds", "2026" -> "twenty twenty-six"). So every numeric rewrite is
+# gated on CJK adjacency: only digits whose nearest non-space neighbour on
+# either side is a CJK ideograph get spoken in Chinese. Per-digit gating (not
+# whole-text language sniffing) is deliberate: mixed prose like "GDP 增长 5.2%"
+# is the everyday reality. normalize_symbols is NOT gated — markdown/quotation/
+# lone-surrogate scrubbing is script-neutral and protects English too.
+_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+
+
+def _cjk_adjacent(text, start, end):
+    left = text[:start].rstrip()
+    right = text[end:].lstrip()
+    return bool((left and _CJK_RE.match(left[-1]))
+                or (right and _CJK_RE.match(right[0])))
+
 
 def normalize_numbers(text):
     def repl(m):
+        if not _cjk_adjacent(text, m.start(), m.end()):
+            return m.group(0)  # latin neighbourhood: the model reads it itself
         tok = m.group(0)
         if "." in tok:
             int_part, dec_part = tok.split(".", 1)
@@ -165,10 +187,12 @@ _UNIT_RE = re.compile(r"(\d+)(ms|min|s|h)(?![a-zA-Z])")
 
 def normalize_units(text):
     def repl(m):
+        if not _cjk_adjacent(text, m.start(), m.end()):
+            return m.group(0)  # "took 5ms" stays latin for the English frontend
         return m.group(1) + _UNIT_MAP[m.group(2)]
     return _UNIT_RE.sub(repl, text)
 
-_TIME_RE = re.compile(r"(\d{1,2}):(\d{2})(?::(\d{2}))?")
+_TIME_RE = re.compile(r"\b(\d{1,2}):(\d{2})\b(?::(\d{2})\b)?")
 
 
 def _hour_cn(h):
@@ -177,14 +201,48 @@ def _hour_cn(h):
     return _CN_DIGITS[h // 10] + "十" + (_CN_DIGITS[h % 10] if h % 10 else "")
 
 
+# Latin-context time spelling (2026-11-20 international fix): the engine has
+# no English text normalization of its own, and whisper-verified A/B against
+# R2T2 (Chinese-lean ASR) proved the digit form "4:45" gets read with Chinese
+# syllables even under an explicit English language tag ("It is 四四級五
+# a.m."), while plain latin digits ("13 test cases", "a.m.") read as English
+# fine. So times must be spelled into English WORDS before synthesis.
+_EN_ONES = ("zero one two three four five six seven eight nine ten eleven "
+            "twelve thirteen fourteen fifteen sixteen seventeen eighteen "
+            "nineteen").split()
+_EN_TENS = {2: "twenty", 3: "thirty", 4: "forty", 5: "fifty"}
+
+
+def _en_num59(n):
+    if n < 20:
+        return _EN_ONES[n]
+    t, r = divmod(n, 10)
+    return _EN_TENS[t] + ("-" + _EN_ONES[r] if r else "")
+
+
+def _time_en(h, mm, ss):
+    if mm == 0 and ss in (None, 0):
+        return _en_num59(h) + " o'clock"
+    # 11-20 主人亲耳终审: "oh five" 念成汉字(穿帮)、裸 "o five" 念对英文——白名单只留 o。
+    s = _en_num59(h) + (" o " if 0 < mm < 10 else " ") + _en_num59(mm)
+    if ss:
+        s += " " + _en_num59(ss)
+    return s
+
+
 def normalize_times(text):
     def repl(m):
         h, mm = int(m.group(1)), int(m.group(2))
         ss = int(m.group(3)) if m.group(3) else None
         if not (0 <= h <= 23 and 0 <= mm <= 59) or (ss is not None and not 0 <= ss <= 59):
             return m.group(0)
+        if not _cjk_adjacent(text, m.start(), m.end()):
+            return _time_en(h, mm, ss)  # "at 12:30 pm" -> "twelve thirty pm"
         s = _hour_cn(h) + "点"
-        s += "整" if mm == 0 else _int_to_cn(mm) + "分"
+        if mm == 0:
+            s += "零分" if ss else "整"
+        else:
+            s += _int_to_cn(mm) + "分"
         if ss is not None and ss != 0: s += _int_to_cn(ss) + "秒"
         return s
     return _TIME_RE.sub(repl, text)
@@ -481,12 +539,27 @@ def _quality_ok(audio, sr):
     return True
 
 # ---- Sentence splitting & silence trimming ----
-_SENT_RE = re.compile(r'(?<=[。！？；…\.\!?\;])\s*')
+# Sentence ends: CJK punctuation splits anywhere; Latin .!?; only splits when
+# followed by whitespace/EOL (so the dots inside "a.m." / "e.g." are not cut
+# mid-word — the old regex split "4:45 a.m." into "4:45 a" + "m", which made
+# the model read the orphaned time fragment with Chinese habits), and even
+# then a ".x." single-letter abbreviation tail (.m. of a.m.) suppresses it.
+_SENT_RE = re.compile(r'(?<=[。！？；…])\s*|(?<=[.!?\;])(?<!\.[a-z]\.)(?=\s|$)')
 
+
+_TIMEY_RE = re.compile(
+    r"\d{1,2}[:：]\d{2}"                                  # 数字钟点 4:45
+    r"|[〇零一二两三四五六七八九十百]{1,4}点"                # 汉字钟点 四点/十二点
+    r"|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|"
+    r"thirty|forty|fifty|o'clock|o)\b", re.I)             # 英文时间词 nine/o five(o=11-20 白名单写法)
 
 def _split_sentences(text):
     """Sentence-level split; anything past MAX_LEN chars gets a second comma/pause split.
-    Keeps one giant blob from blowing past max_new_tokens and being truncated mid-read."""
+    Keeps one giant blob from blowing past max_new_tokens and being truncated mid-read.
+    时间密集门(11-20 主人亲耳实锤)：1.7B talker 在一句里遇到两个及以上钟点会漂——
+    英文时间词念成汉字("nine oh five"→九点零五)、汉字时间吞念("四点零分三十秒"→四点点半)，
+    单独喂短句实测全对。故两个时间块绝不许合并进同一次生成，就地切开各自合成。"""
     MAX_LEN = 60
     parts = _SENT_RE.split(text)
     out = []
@@ -494,14 +567,16 @@ def _split_sentences(text):
         p = p.strip()
         if not p:
             continue
-        if len(p) <= MAX_LEN:
+        if len(p) <= MAX_LEN and len(_TIMEY_RE.findall(p)) < 2:
             out.append(p)
             continue
-        # oversized sentence: second-pass split on commas/pauses/colons/newlines, greedy-merge up to MAX_LEN
-        sub = re.split(r"(?<=[，、：\n])", p)
+        # oversized / time-dense: second-pass split on commas/pauses/colons/newlines
+        sub = re.split(r"(?<=[，,、：:;\n])", p)
         buf = ""
         for s in sub:
-            if len(buf) + len(s) > MAX_LEN and buf:
+            # flush before merge when: 会超长, 或 buf 与 s 各含时间块（两个钟点不进同一句）
+            if buf and (len(buf) + len(s) > MAX_LEN or
+                        (_TIMEY_RE.search(buf) and _TIMEY_RE.search(s))):
                 out.append(buf)
                 buf = ""
             buf += s
@@ -515,7 +590,7 @@ def _trim_leading_silence(audio, sr):
     if len(audio) > sr * 0.5:
         rms_win = int(sr * 0.05)
         rms = np.array([np.abs(audio[i:i+rms_win]).mean() for i in range(0, len(audio)-rms_win, rms_win)])
-        voiced = np.where(rms > 30)[0]
+        voiced = np.where(rms > 0.005)[0]
         if len(voiced) > 0:
             start = int(voiced[0] * rms_win)
             if start > 0:
@@ -632,14 +707,27 @@ def _resolve_voice(spec=None):
     return ref_audio, (spec.get("ref_text") or "").strip() or None, temp
 
 # ---- Generation dispatch (three kinds, shared sampling knobs) ----
-_ref_spk_emb_cache = {}   # clone: per-ref speaker embedding, cross-sentence reuse
+
+# (11-20 摘除 _ref_spk_emb_cache：缓存路从未生效+已被耳朵判死，见 _gen_sentence 注释)
 
 
 def _gen_sentence(M, spec, sent, quant=None):
     """Generate one sentence per spec kind; returns (audio_float32, sr)."""
     temp = float(spec.get("temperature") or TEMPERATURE)
-    common = dict(language="Chinese", temperature=temp, do_sample=True,
-                  top_p=0.85, max_new_tokens=480, repetition_penalty=1.2)
+    # Language tag follows the sentence's script (2026-11-20 international
+    # fix, owner: foreign users read aloud English). The old hardcoded
+    # language="Chinese" pinned EVERY sentence — even pure-English ones —
+    # to the Chinese language id, so the model read "4:45 a.m." as
+    # 四点四十五. Probe on this machine (whisper-transcribed A/B/C, see
+    # scratch/tts_probe_asr.py output): explicit English tag -> clean English
+    # reading; "auto" -> first half English, second half degenerates into
+    # gibberish on long sentences; Chinese tag -> full Chinese-isms. So:
+    # CJK-bearing sentences keep the explicit Chinese tag (mixed prose reads
+    # best in Chinese mode, owner-validated daily path); latin-only sentences
+    # get the explicit English tag.
+    lang = "Chinese" if _CJK_RE.search(sent) else "English"
+    common = dict(language=lang, temperature=temp, do_sample=True,
+                  top_p=0.85, max_new_tokens=480, repetition_penalty=1.05)
     kind = spec.get("kind")
     if kind == "speaker":
         result = M.generate_custom_voice(
@@ -649,35 +737,18 @@ def _gen_sentence(M, spec, sent, quant=None):
         result = M.generate_voice_design(
             text=sent, instruct=(spec.get("instruct") or "").strip(), **common)
         return result[0][0], result[1]
-    # clone: speaker-embedding cache so multi-sentence runs cost ONE
-    # reference encode (measured ~500 ms saved per sentence)
+    # clone: 每句 raw ICL = 11-20 主人亲耳全对定格形态(ab-icl-* 组)。原 spk-embedding
+    # 缓存分支传的是引擎签名里不存在的 spk_emb/spk/spk_id(真名 ref_spk_emb 系)，缓存
+    # 命中必 TypeError 被阶梯静默吞掉、从未真正生效；ref_spk_emb+xvec_only 官方缓存路
+    # 同晚被主人耳朵判死(英文后半卡壳)。一并摘除，单路到底。
     ref_audio = spec.get("ref_audio")
     if not ref_audio or not os.path.isfile(ref_audio):
         raise ValueError(_ui("克隆音色需要参考音频文件，当前: %r（文件不存在？）",
                              "a clone voice needs a reference audio file, got: %r (file missing?)")
                          % (ref_audio or ""))
     ref_text = (spec.get("ref_text") or "").strip() or None
-    cached = _ref_spk_emb_cache.get(ref_audio)
-    if cached is not None:
-        result = M.generate_voice_clone(
-            text=sent, ref_audio=None, ref_text=None,
-            spk_emb=cached["spk_emb"], spk=cached["spk"],
-            spk_id=cached["spk_id"], **common)
-        return result[0][0], result[1]
     result = M.generate_voice_clone(
         text=sent, ref_audio=ref_audio, ref_text=ref_text, **common)
-    prof = (getattr(M, "last_profile", None) or {}).get("spk") or {}
-    spk_emb = prof.get("spk_emb")
-    if spk_emb is not None:
-        import numpy as _np
-        if isinstance(spk_emb, list):
-            spk_emb = _np.array(spk_emb, dtype=_np.float32)
-        _ref_spk_emb_cache[ref_audio] = {
-            "spk_emb": spk_emb,
-            "spk": prof.get("spk") or "speaker_0",
-            "spk_id": prof.get("spk_id") or 0}
-        print(f"[yache-voice] cached ref_spk_emb ({os.path.basename(ref_audio)})",
-              file=sys.stderr, flush=True)
     return result[0][0], result[1]
 
 
@@ -702,6 +773,29 @@ def _gen_with_fallback(spec, sent):
                 continue
             raise
     raise RuntimeError("unreachable")
+
+
+def _est_speech_seconds(sent):
+    """粗时长预算: 汉字 ~0.30s/字、拉丁 ~0.07s/字符，地板 1.5s。"""
+    han = sum(1 for ch in sent if "\u4e00" <= ch <= "\u9fff")
+    return max(1.5, han * 0.30 + (len(sent) - han) * 0.07)
+
+
+def _gen_guarded(spec, sent):
+    """时长守门(11-20 主人亲耳实锤 44s 复读案): penalty 归位 1.05 防崩后，时间句
+    偶发复读循环把音频灌到 30-45s。超预算 2 倍+1.5s 判为循环，重抽一次取较短者——
+    正常念读永远碰不到这条线，零误杀。"""
+    audio, sr = _gen_with_fallback(spec, sent)
+    import numpy as np
+    dur = np.asarray(audio).size / max(sr, 1)
+    cap = _est_speech_seconds(sent) * 2.0 + 1.5
+    if dur > cap:
+        print("[yache-voice] loop-guard: %.1fs 超预算 cap %.1fs，重抽一次: %r"
+              % (dur, cap, sent[:50]), file=sys.stderr, flush=True)
+        a2, sr2 = _gen_with_fallback(spec, sent)
+        if np.asarray(a2).size / max(sr2, 1) < dur:
+            audio, sr = a2, sr2
+    return audio, sr
 
 # ---- Main synthesize function (inline, zero disk I/O) ----
 
@@ -762,7 +856,7 @@ def synthesize(text: str) -> None:
 
         for i, sent in enumerate(sentences):
             try:
-                audio, sr = _gen_with_fallback(spec, sent)
+                audio, sr = _gen_guarded(spec, sent)
                 audio = _trim_leading_silence(audio, sr)
                 play_queue.put((audio, sr, i))
                 dur = len(audio) / sr
@@ -815,7 +909,14 @@ def _server_loop():
     Exits automatically after _TTS_IDLE_TIMEOUT seconds of inactivity.
     """
     import numpy as np
-    import librosa
+    try:
+        import librosa
+    except ModuleNotFoundError:
+        # librosa (and its scipy/numba tail) only exist to stretch the
+        # stream 0.95x — a timbre nicety, never a reason to kill the whole
+        # streaming read-aloud chain on a lean install (2026-11-19 fresh-
+        # machine audit).
+        librosa = None
 
     # Model load is lazy now (happens on the first request): READY comes
     # fast even when the spec is broken, and a bad spec yields a clean
@@ -886,7 +987,7 @@ def _server_loop():
                     audio, sr = _gen_with_fallback(req_spec, sent)
                     audio = _trim_leading_silence(audio, sr)
                 # ease the pace ~5% (time-stretch, pitch preserved: keeps the soft feel without sounding hollow)
-                if len(audio) > sr * 0.1:  # only for clips over 100ms; skip anything shorter
+                if librosa is not None and len(audio) > sr * 0.1:  # >100ms only; and librosa is optional
                     audio = librosa.effects.time_stretch(audio, rate=0.95)
                 pcm16 = np.clip(audio * 32767.0, -32768, 32767).astype(np.int16)
                 del audio
@@ -924,7 +1025,7 @@ def _preview_loop():
         text = normalize_numbers(normalize_units(normalize_times(
             normalize_symbols(text))))
         t0 = time.time()
-        audio, sr = _gen_with_fallback(spec, text)
+        audio, sr = _gen_guarded(spec, text)
         audio = _trim_leading_silence(audio, sr)
         import numpy as np
         a = np.asarray(audio, dtype=np.float32)

@@ -7,6 +7,7 @@ One plugin, one full local voice pipeline for Hermes Desktop:
 | **TTS** | Qwen3-TTS 1.7B via ggml `qwen.dll` — zero-disk streaming PCM playback, VRAM released right after each answer. Provider name `qwen3-tts` (host-config compatible). |
 | **STT** | Local faster-whisper (CPU int8) inside a plugin-owned Python environment the panel can build in one click. Provider name `local-stt`. |
 | **Wake word** | The host's **official built-in** sherpa-onnx KWS engine (`wake_word.provider: sherpa`). This plugin does not replace it; its dashboard just exposes the official settings. |
+| **Read-aloud smarts** | Numbers, times and units are spoken in the sentence's own language: "Call me at 9:05" reads as natural English, "明天 8:03 开会" as natural Chinese. English text never leaks Chinese syllables. |
 
 Nothing is fetched behind your back: every download (the speech-to-text
 environment, a whisper model) happens only when you press a button in the

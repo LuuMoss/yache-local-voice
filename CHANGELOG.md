@@ -3,6 +3,10 @@
 ## 0.1.0 — first public release (2026-11-19)
 - Voice cloning TTS on Qwen3-TTS 1.7B: fully local, zero cloud, zero API
   keys; any-reference voice cloning with your own recorded timbres.
+- Time and number read-aloud follows each sentence's own language: "Call me at
+  9:05" is spoken as natural English ("nine-oh-five"), while "明天 8:03 开会" is
+  spoken as natural Chinese (八点零三分). Dates, durations and units normalize the
+  same way, and English sentences stay fully English on time words.
 - Speech recognition moved onto its own legs: the engine lives in
   `<HERMES_HOME>/stt/.venv`, built on demand by the panel with a live
   progress bar, so official Hermes upgrades can no longer take

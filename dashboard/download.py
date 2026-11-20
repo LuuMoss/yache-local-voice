@@ -31,6 +31,7 @@ import os
 import re
 import shutil
 import sys
+import tarfile
 import threading
 import time
 import zipfile
@@ -46,6 +47,9 @@ if _ROOT not in sys.path:
 from yache_engine import paths as _p  # noqa: E402
 from yache_engine import yache_voice as _vy  # noqa: E402
 from yache_engine import i18n as _i18n  # noqa: E402  (bilingual user-facing strings)
+from yache_engine import logbox as _logbox  # noqa: E402 (silent-failure killer)
+
+_log = _logbox.get_logger()
 
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) YacheLocalVoice/1.0"
 _CHUNK = 262144
@@ -61,7 +65,9 @@ GPU_REPO = "LuuMoss/yache-local-voice"
 GPU_TAG = "cuda-pack-v1"
 GPU_ASSET = "yache-cuda-windows-x64.zip"
 GPU_META = "metadata.json"
-GPU_ENDPOINTS = ["https://github.com", "https://gh-proxy.com"]
+GPU_ENDPOINTS = ["https://github.com", "https://gh-proxy.com/https://github.com",
+                 "https://ghfast.top/https://github.com"]
+GPU_GITHUB = GPU_ENDPOINTS[0]      # the ramp-up-prone mainline (see pick)
 
 # ---- catalog: real values from the HF model card (0.6b has no voicedesign) ----
 QUANTS = ["q4_k_m", "q8_0", "bf16", "f32"]
@@ -203,11 +209,109 @@ def _speed_test(url: str, timeout: float = 6.0) -> Optional[float]:
             pass
 
 
-def pick_hf_endpoint() -> Dict[str, Any]:
-    """Fastest reachable Hugging Face endpoint for this session (never cached,
-    so a VPN toggle is picked up on the next click). Winner = fastest
-    first-128-KB time."""
-    scores = {c: _speed_test(f"{c}/{HF_REPO}/resolve/main/README.md") for c in HF_ENDPOINTS}
+class NoEndpointError(RuntimeError):
+    """Not one download leg can stream bytes right now."""
+
+
+def _probe_leg(url: str, budget: float = 12.0, want: int = 2097152,
+               start: int = 0) -> Optional[float]:
+    """Seconds-to-download-`want` extrapolation, measured on the REAL asset
+    stream (Range GET); None when the leg cannot stream at all. Probing only
+    a tiny README/metadata file is the classic China trap: GitHub happily
+    serves 4.9 KB of JSON on a bare connection — then the 543 MB body stalls
+    forever. A 512 KB head sample is ALSO not enough: free public mirrors
+    cache only the first megabytes at the CDN edge, so the head reads at
+    9 MB/s while the body crawls at 0.04 (owner watched exactly this on
+    2026-11-19: probe crowned ghfast at 9 MB/s, the real round sank to a
+    trickle). The picker therefore samples TWICE — 2 MB at the head (warm
+    CDN cache, legitimately fast if the mirror kept the whole asset warm)
+    and 2 MB at the 1/3 mark (cold body, where warm-head impostors show
+    their true face) — and keeps the better score: a genuinely warm leg
+    wins on the head sample, an honest cold-fast leg wins on the body, and
+    a warm-head trickle that died mid-file loses both. A trickle still
+    scores (extrapolated slow, loses honestly); only a dead leg scores
+    None. Lower = better.
+
+    The window is 2 MB / 12 s, NOT 1 MB / 6 s (owner's WARP sighting, same
+    evening): GitHub through the Cloudflare tunnel takes ~10 s to ramp up,
+    so a 6 s window convicted the mainline at 0.11 MB/s while it was really
+    doing 0.66+ and CLIMBING — meanwhile gh-proxy (locally hosted CDN,
+    instant first byte) won the probe and then died outright with a 15 s
+    timeout on the very same tunnel. Slow starters need a longer window to
+    speak; the budget only burns on legs that are actually slow, a fast
+    leg finishes its 2 MB and reports early."""
+    best: Optional[float] = None
+    for s in _window_order(start):      # far windows FIRST, head last
+        v = _probe_once(url, budget, want, s)
+        if v is not None and (best is None or v < best):
+            best = v
+    return best
+
+
+def _window_order(start: int):
+    """Sampling order = far window BEFORE the head (and the head's twin
+    last again when the asset has no far window). Cloudflare/CDN tunnels
+    pay a ramp-up tax during the first seconds of a fresh connection; if
+    every leg probed the head first, the leg probed LAST would enjoy the
+    warmest route and win a rigged race (owner's 22:49 WARP probe: the
+    gh-proxy leg that ran second read faster than GitHub only because
+    GitHub went first and ate the cold-route tax). Round-robin the phase
+    across legs instead: whoever goes first pays, on EVERY leg equally."""
+    if start > 0:
+        return (start, 0)
+    return (0,)
+
+
+def _probe_once(url: str, budget: float, want: int, start: int) -> Optional[float]:
+    resp = None
+    try:
+        req = Request(url, headers={"User-Agent": _UA,
+                                    "Accept-Encoding": "identity",
+                                    "Range": f"bytes={start}-{start + want - 1}"})
+        t0 = time.monotonic()
+        resp = urlopen(req, timeout=6)
+        if resp.status >= 300:
+            return None
+        if start > 0 and resp.status != 206:
+            # Range ignored (200 = whole body from byte 0): this leg cannot
+            # honour mid-file resumes either — score it as a straggler
+            # instead of silently measuring a different byte range.
+            return 1e9
+        got = 0
+        while got < want and time.monotonic() - t0 < budget:
+            chunk = resp.read(min(65536, want - got))
+            if not chunk:
+                break
+            got += len(chunk)
+        if not got:
+            return None
+        return (time.monotonic() - t0) * (want / got)
+    except Exception:
+        return None
+    finally:
+        try:
+            if resp is not None:
+                resp.close()
+        except Exception:
+            pass
+
+
+def pick_hf_endpoint(probe_files: Optional[List[str]] = None,
+                     exclude: Optional[set] = None) -> Dict[str, Any]:
+    """Fastest reachable Hugging Face endpoint for this session (never cached
+    and never pinned: every attempt re-probes, so a VPN toggle or a mirror
+    that died mid-run is picked up immediately). With probe_files — the real
+    asset names about to be fetched — the probe pulls REAL bytes from the
+    asset stream instead of trusting the README."""
+    scores: Dict[str, Optional[float]] = {}
+    for c in HF_ENDPOINTS:
+        if exclude and c in exclude:
+            continue
+        if probe_files:
+            scores[c] = _probe_leg(
+                f"{c}/{HF_REPO}/resolve/main/{quote(probe_files[0])}")
+        else:
+            scores[c] = _speed_test(f"{c}/{HF_REPO}/resolve/main/README.md")
     reach = {k: v for k, v in scores.items() if v is not None}
     if not reach:
         return {"endpoint": None, "scores": scores}
@@ -310,10 +414,21 @@ def _new_state(kind: str, target: str) -> Dict[str, Any]:
 
 def _download_into(url: str, dest: Path, st: Dict[str, Any],
                    want_sha: Optional[str] = None,
-                   total_hint: Optional[int] = None) -> str:
-    """Return "ok" | "cancelled" | "interrupted" | "error". Resumable through
-    .part + Range; a stale .part (server identity moved) is dropped and the
-    file restarted. Progress is persisted every 0.8 s so the panel can poll."""
+                   total_hint: Optional[int] = None,
+                   others_best_Bps: Optional[float] = None) -> str:
+    """Return "ok" | "cancelled" | "interrupted" | "slow" | "error".
+    Resumable through .part + Range; a stale .part (server identity moved)
+    is dropped and the file restarted. Progress is persisted every 0.8 s so
+    the panel can poll.
+
+    Slow-leg watchdog (others_best_Bps): a pre-flight probe can never see a
+    ramp-up tunnel's steady state, so selection is sometimes "best of a
+    warm moment" and the chosen leg crawls once the round starts. Rather
+    than ever-longer probes we measure DURING use: 25 s ramp-free grace,
+    then a 30 s rolling window — sustained under 40% of what the OTHER legs
+    promised their caller — the leg is slow-dead: bail out (every byte kept
+    via .part Range resume), return "slow" so the log says slow and not
+    broken wire, and let the caller demote the leg and re-pick."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
     have = part.stat().st_size if part.exists() else 0
@@ -370,6 +485,8 @@ def _download_into(url: str, dest: Path, st: Dict[str, Any],
         t0 = time.monotonic()
         start_have = have
         last_beat = 0.0
+        wd_free = t0 + 25.0   # watchdog: ramp grace, then 30 s observation
+        wd_t = wd_have = None
         with open(part, "ab" if have else "wb") as fh:
             while True:
                 if _cancel_requested(st):
@@ -388,6 +505,19 @@ def _download_into(url: str, dest: Path, st: Dict[str, Any],
                 st["done_bytes"] = base + have
                 now = time.monotonic()
                 if now - last_beat >= 0.8:
+                    if others_best_Bps:
+                        if now < wd_free:
+                            wd_t, wd_have = now, have
+                        elif wd_t is not None and now - wd_t >= 30.0:
+                            _v = (have - wd_have) / (now - wd_t)
+                            if _v < 0.4 * others_best_Bps:
+                                st["note"] = _i18n.ui(
+                                    "这条腿实测不足其它腿承诺速度的四成——判慢换腿（进度不丢）",
+                                    "this leg sustains under 40% of what the "
+                                    "other legs promised — switching legs, "
+                                    "progress kept")
+                                _save(st)
+                                return "slow"
                     el = max(0.5, now - t0)
                     moved = have - start_have
                     st["mbps"] = round(moved / el / 1048576, 2) if moved > 0 else None
@@ -494,16 +624,61 @@ def _run_model(st: Dict[str, Any]) -> None:
                     break
         st["total_bytes"] = int(st["base_bytes"]) + total
         _save(st)
-        for label in plan:
+        # The connection is never pinned to one source either: legs are
+        # re-probed on the REAL asset bytes before the first fetch, and a
+        # source that dies mid-file is demoted and replaced by the next-best
+        # one — the .part bytes carry across sources (identical files on
+        # every mirror) and the new leg re-derives its Range offset from
+        # them, so rotation resumes instead of restarting.
+        labels = list(plan)
+        if labels:
+            sel2 = pick_hf_endpoint(probe_files=labels)
+            if sel2.get("endpoint"):
+                base = sel2["endpoint"]
+                st["endpoint"] = base
+                _save(st)
+        dead: "set[str]" = set()
+        i = 0
+        while i < len(labels):
+            label = labels[i]
             st["step_label"] = label
             _save(st)
+            _log.info(_i18n.ui("转录模型轮次: 腿=%s 文件=%s 死腿=%s",
+                     "model round: leg=%s file=%s dead=%s"),
+            base, label, sorted(dead) or "-")
             res = _download_into(f"{base}/{HF_REPO}/resolve/main/{quote(label)}",
                                  models_dir / label, st)
-            if res != "ok":
-                if res != "cancelled":
-                    st["state"] = "interrupted"
+            if res == "cancelled":
                 _save(st)
                 return
+            if res == "ok":
+                i += 1
+                continue
+            if res == "error":
+                # 4xx on this path — every mirror carries the same files, so
+                # bouncing sources would only re-404; keep the old stop and
+                # let the note guide the user.
+                _save(st)
+                return
+            dead.add(base)
+            _log.warning(_i18n.ui("转录模型腿 %s 在 %s 上阵亡（%s）—— 换腿（死腿=%s）",
+                         "model leg %s died on %s (%s) — rotating (dead=%s)"),
+               base, label, res, sorted(dead))
+            sel2 = pick_hf_endpoint(probe_files=labels[i:], exclude=dead)
+            if not sel2.get("endpoint"):
+                st["state"] = "interrupted"
+                st["note"] = _i18n.ui(
+                    "所有下载源都试过一轮没走通——进度还在，按「续传」会重新测速换源",
+                    "every source was tried this round — progress kept; press "
+                    "resume to re-probe all sources")
+                _save(st)
+                return
+            base = sel2["endpoint"]
+            st.update(state="running", endpoint=base, mbps=None, eta_s=None,
+                      note=_i18n.ui("这个源断了——自动换下一个源续传（进度不丢）",
+                                    "this source died — auto-switching to the "
+                                    "next source, progress kept"))
+            _save(st)
         st["step_label"] = None
         st.update(state="probing", mbps=None, eta_s=None)
         st["target"] = str(tts_base)
@@ -567,7 +742,9 @@ def resume_download() -> Dict[str, Any]:
         st.pop("mbps", None)
         st.pop("eta_s", None)
         _clear_cancel_marker()
-        target = _run_model if st.get("kind") == "model" else _run_gpu
+        target = (_run_model if st.get("kind") == "model"
+                  else _run_wake if st.get("kind") == "wake"
+                  else _run_gpu)
         _save(st)
         threading.Thread(target=target, args=(st,), daemon=True,
                          name=f"yache-dl-resume-{st.get('kind')}").start()
@@ -581,13 +758,88 @@ def _gpu_urls(base: str) -> Tuple[str, str]:
     return f"{root}/{GPU_ASSET}", f"{root}/{GPU_META}"
 
 
-def pick_gpu_endpoint() -> str:
-    """Direct GitHub first; the public gh-proxy mirror as the CN fallback."""
-    for cand in GPU_ENDPOINTS:
-        _, meta = _gpu_urls(cand)
-        if _speed_test(meta, timeout=6.0) is not None:
-            return cand
-    return GPU_ENDPOINTS[0]
+# The mainline leg rides the Cloudflare/WARP tunnel, which RAMP UP: the
+# first ~15 s of a fresh tunnel read slow while it establishes, then it
+# climbs to multiples of any local mirror (owner's 22:46 WARP test: 10 MB
+# at 0.66 MB/s still climbing, CF's own speed point 1.3 MB/s, while
+# gh-proxy died with a 15 s timeout on that same tunnel). Mirrors are
+# locally hosted CDNs with instant first byte — one window size fits one
+# of them badly: 2 MB/12 s convicts the slow-starter forever. So the
+# GitHub leg gets a big generous window (10 MB / 40 s: after the ramp the
+# steady state shows inside it), mirrors keep the tight one.
+_GPU_BIG = {"want": 10 * 1048576, "budget": 40.0}
+
+
+def pick_gpu_endpoint(exclude: Optional[set] = None,
+                      size: Optional[int] = None):
+    """Returns (winner_base, scores) — scores travel with the winner so
+    the round's watchdog knows what the OTHER legs promised (see
+    _run_gpu)."""
+    """Fastest GPU-pack leg for this round, measured on the REAL asset bytes
+    (Range probe), never on the tiny metadata.json alone — that was the
+    original trap: a bare CN connection reads 4.9 KB of JSON from GitHub in
+    seconds, gets crowned winner, then stalls forever on the 543 MB body.
+    A 512 KB head sample is the SECOND trap (2026-11-19): free mirrors keep
+    only the first megabytes warm at the CDN edge, head probes crown them
+    at 9 MB/s while the real stream crawls at 0.04. When the asset size is
+    known the sample is aimed at the file's 1/3 mark — cold body bytes,
+    where legs show their true sustained speed. `exclude` demotes legs the
+    current run already burned; NoEndpointError fires only when nothing
+    left can stream at all."""
+    start = (size // 3) if (size and size >= 12 * 1024 * 1024) else 0
+    urls = {c: _gpu_urls(c)[0] for c in GPU_ENDPOINTS
+            if not exclude or c not in exclude}
+    def _score(c: str, u: str):
+        if c == GPU_GITHUB:
+            return _probe_leg(u, budget=_GPU_BIG["budget"],
+                              want=_GPU_BIG["want"], start=start)
+        return _probe_leg(u, start=start)
+    scores = {c: _score(c, u) for c, u in urls.items()}
+    _log.info(_i18n.ui("GPU 腿探针 @%sB: %s（排除=%s）",
+                     "gpu leg probe @%sB: %s (excluded=%s)"),
+            start,
+            {k: (round(v, 2) if v is not None else None) for k, v in scores.items()},
+            sorted(exclude or ()) or "-")
+    live = {k: v for k, v in scores.items() if v is not None}
+    if not live:
+        raise NoEndpointError(
+            "no GPU download leg can stream bytes right now — tried "
+            f"{sorted(urls) or 'nothing (all legs already burned this run)'}")
+    best = min(live, key=lambda k: live[k])
+    return best, scores
+
+
+PACK_MANIFEST = ".yache-pack-manifest.json"
+
+
+def _write_pack_manifest(cdir: Path, kind: str = "gpu",
+                         pack: str = GPU_ASSET) -> Optional[str]:
+    """Inventory every file the installer just placed (relative path +
+    size + sha256) so an uninstall can reverse exactly THIS install: only
+    inventoried files get removed, anything the user later dropped into
+    the folder is left alone. Three install kinds share this ledger —
+    "gpu" (accelerator pack), "stt-model" (whisper HF cache dir), "stt-env"
+    (the ASR venv) — the manifest lives INSIDE the installed folder so it
+    travels with it. Returns an error string or None."""
+    files: List[Dict[str, Any]] = []
+    try:
+        for f in sorted(cdir.rglob("*")):
+            if not f.is_file() or f.name == PACK_MANIFEST:
+                continue
+            h = hashlib.sha256()
+            with open(f, "rb") as fp:
+                for chunk in iter(lambda: fp.read(1 << 20), b""):
+                    h.update(chunk)
+            files.append({"path": f.relative_to(cdir).as_posix(),
+                          "size": f.stat().st_size, "sha256": h.hexdigest()})
+        man = {"kind": kind, "pack": pack, "files": files,
+               "installed_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+        (cdir / PACK_MANIFEST).write_text(
+            json.dumps(man, ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        _log.warning(_i18n.ui("加速包快照写入失败: %s", "pack manifest write failed: %s"), e)
+        return None  # not fatal: uninstall falls back to the legacy route
+    return None
 
 
 def _extract_pack(zip_path: Path, dest: Path) -> Optional[str]:
@@ -633,40 +885,123 @@ def _extract_pack(zip_path: Path, dest: Path) -> Optional[str]:
 
 def _run_gpu(st: Dict[str, Any]) -> None:
     try:
-        base = pick_gpu_endpoint()
-        st["endpoint"] = base
-        dl, meta = _gpu_urls(base)
-        _save(st)
-        want_sha, zip_bytes = None, None
-        try:
-            with _get(meta, 20.0) as r:
-                md = json.loads(r.read().decode("utf-8"))
-            want_sha = str(md.get("sha256") or "").lower()
-            zip_bytes = int(md.get("bytes") or 0) or None
-        except Exception as e:
-            st.update(state="error",
-                      note=f"cannot read metadata.json from GitHub ({type(e).__name__}) — "
-                           f"proxy/VPN needed? {str(e)[:80]}")
-            _save(st)
-            return
-        if not re.fullmatch(r"[0-9a-f]{64}", want_sha or ""):
-            st.update(state="error", note="metadata.json has no sha256 digest")
-            _save(st)
-            return
         cdir = _p.cuda_pack_dir()
-        st["target"] = str(cdir)
-        st["steps_total"] = 2
-        st["base_bytes"] = int(st.get("done_bytes") or 0)
-        st["total_bytes"] = st["base_bytes"] + (zip_bytes or 0)
-        st["step_label"] = GPU_ASSET
-        _save(st)
         zip_path = _p.hermes_home() / GPU_ASSET
-        res = _download_into(dl, zip_path, st, want_sha=want_sha, total_hint=zip_bytes)
-        if res != "ok":
-            if res != "cancelled":
-                st["state"] = "interrupted"
+        # The connection is NEVER pinned to one leg: every round re-picks by
+        # throughput measured on the real asset bytes, and a leg that dies
+        # mid-stream (WARP toggled off, cable hiccup, sha-corrupted mirror)
+        # gets demoted so the next round runs on a fresh leg. The .part file
+        # is byte-identical across legs — every mirror serves the same
+        # release asset — and each attempt re-derives its Range offset from
+        # the .part, so switching legs resumes exactly where bytes stopped:
+        # no re-download, no double count (base stays 0, total = pack size).
+        dead: "set[str]" = set()
+        while True:
+            # ① metadata FIRST (4.9 KB of JSON — even the bare GitHub leg
+            # that cannot stream a 543 MB body reads it fine). Its "bytes"
+            # field tells the throughput probe where the file's cold middle
+            # is, so the leg is crowned AFTER the true size is known: the
+            # sample aims at the 1/3 mark, never the warmed CDN head that
+            # crowned ghfast at 9 MB/s while the body crawled at 0.04
+            # (owner's 2026-11-19 sighting).
+            base = None
+            for cand in GPU_ENDPOINTS:
+                if cand in dead:
+                    continue
+                try:
+                    _d, _m = _gpu_urls(cand)
+                    with _get(_m, 20.0) as r:
+                        md = json.loads(r.read().decode("utf-8"))
+                    want_sha = str(md.get("sha256") or "").lower()
+                    zip_bytes = int(md.get("bytes") or 0) or None
+                    base = cand
+                    _log.info(_i18n.ui("GPU 元数据: 腿=%s 字节=%s", "gpu metadata: leg=%s bytes=%s"),
+            cand, zip_bytes)
+                    break
+                except Exception as e:
+                    dead.add(cand)
+                    _log.warning(_i18n.ui("GPU 腿 %s: metadata.json 失败（%s）—— 换腿（死腿=%s）",
+                         "gpu leg %s: metadata.json failed (%s) — rotating (dead=%s)"),
+               cand, type(e).__name__, sorted(dead))
+            if base is None:
+                st.update(state="error",
+                          note=_i18n.ui(
+                              "GitHub 和镜像都读不到 metadata.json——需翻墙？",
+                              "cannot read metadata.json from GitHub or its "
+                              "mirrors — proxy/VPN needed?"))
+                _save(st)
+                return
+            if not re.fullmatch(r"[0-9a-f]{64}", want_sha or ""):
+                st.update(state="error", note="metadata.json has no sha256 digest")
+                _save(st)
+                return
+            # ② crown the real-work horse on a DUAL sample (1 MB head +
+            # 1 MB at the 1/3 cold mark, size now known — best of the two).
+            # A dead leg scores None; a warm-head impostor that crawls on
+            # the body loses both samples and yields its seat by itself.
+            try:
+                base, scores = pick_gpu_endpoint(exclude=dead, size=zip_bytes)
+            except NoEndpointError as e:
+                st.update(state="error",
+                          note=_i18n.ui(
+                              "三条腿对真文件体实测都跑不动——开个翻墙再点就是满速；"
+                              "或稍等片刻再试（免费镜像线路全天波动，回血就能下）",
+                              "no leg sustained the real file body — switch on "
+                              "a proxy/VPN for full speed, or retry in a while "
+                              "(free mirror legs fluctuate all day; they "
+                              "recover). Details: " + str(e)[:120]))
+                _save(st)
+                return
+            st["endpoint"] = base
+            dl, meta = _gpu_urls(base)
+            # Watchdog line = 40% of the speed the OTHER live legs promised
+            # (a score is seconds-per-MB; invert to B/s). Owner's 22:46 WARP
+            # case: gh-proxy's warm local CDN won the 12 s race at 0.34 MB/s
+            # while GitHub — promised only 0.16 by its ramp-scarred score —
+            # was really doing 0.66+ and climbing, and the winner died on the
+            # very same tunnel. Selection cannot see a ramp-up steady state,
+            # so the round itself demotes a leg that crawls below what the
+            # losers promised, and hands the baton over.
+            _oth = [v for k, v in scores.items() if k != base and v]
+            oth_line = (0.4 * 1048576.0 / min(_oth)) if _oth else None
             _save(st)
-            return
+            st["target"] = str(cdir)
+            st["steps_total"] = 2
+            st["base_bytes"] = 0
+            st["total_bytes"] = int(zip_bytes or 0)
+            st["step_label"] = GPU_ASSET
+            _save(st)
+            _log.info(_i18n.ui("GPU 拉取轮次: 腿=%s 总量=%s B 续传=%s B 死腿=%s",
+                     "gpu round: leg=%s total=%s B resume=%s B dead=%s"),
+            base, zip_bytes, int(st.get("done_bytes") or 0), sorted(dead) or "-")
+            res = _download_into(dl, zip_path, st, want_sha=want_sha,
+                                 total_hint=zip_bytes,
+                                 others_best_Bps=oth_line)
+            if res == "cancelled":
+                _save(st)
+                return
+            if res == "ok":
+                break
+            # interrupted (stream died, or sha mismatch already dropped the
+            # .part) / error (4xx stale mirror cache): all this leg's own
+            # faults — demote it and re-probe the rest.
+            dead.add(base)
+            _log.warning(_i18n.ui("GPU 腿 %s 以 res=%s 结束于 %s B —— 换腿（死腿=%s）",
+                         "gpu leg %s ended res=%s at %s B — rotating (dead=%s)"),
+               base, res, int(st.get("done_bytes") or 0), sorted(dead))
+            if len(dead) >= len(GPU_ENDPOINTS):
+                st["state"] = "interrupted"
+                st["note"] = _i18n.ui(
+                    "三条腿都试过一轮没走通——进度还在，按「续传」会重新测速换腿",
+                    "every leg was tried this round — progress kept; press "
+                    "resume to re-probe all legs")
+                _save(st)
+                return
+            st.update(state="running", mbps=None, eta_s=None,
+                      note=_i18n.ui("这条腿断了——自动换下一条腿续传（进度不丢）",
+                                    "this leg died — auto-switching to the "
+                                    "next leg, progress kept"))
+            _save(st)
         st.update(state="extracting", step_label=None, mbps=None, eta_s=None)
         _save(st)
         err = _extract_pack(zip_path, cdir)
@@ -680,6 +1015,7 @@ def _run_gpu(st: Dict[str, Any]) -> None:
         elif not _p.cuda_pack_ready(cdir):
             st.update(state="error", note="extracted pack failed the completeness check")
         else:
+            _write_pack_manifest(cdir)
             st.update(state="done", note=None, done_bytes=st.get("total_bytes"), pct=100.0)
         _save(st)
     except Exception as e:
@@ -704,23 +1040,529 @@ def start_gpu_download(gate_ok: bool, gate_reason: str = "") -> Dict[str, Any]:
 # ---- read side for the panel ----------------------------------------------------------
 
 def gpu_status() -> Dict[str, Any]:
-    """Installed-ness + the gate that unlocks the download button. The gate is
-    computed by the backend, never trusted from the frontend: a model pair
-    must scan clean from the currently loaded tts_base_dir."""
+    """Installed-ness + whether the download button may run. There is NO
+    model gate here: the CUDA pack is an engine runtime, logically
+    independent of the model weights — either may be fetched first, and a
+    fresh machine with no base dir must still offer the button. The only
+    hard dependency (NVIDIA presence) is surfaced by the panel's amber
+    line, not as a lock. Kept gate_ok/gate_reason keys for the old API
+    shape."""
     cdir = _p.cuda_pack_dir()
-    scan = _vy.scan_models_dir(_p.tts_base_dir())
-    # same gate the manual directory-load save path uses: a scan-clean pair
-    gate_ok = bool(scan.get("variants")) and bool((scan.get("tokenizer") or {}).get("preferred"))
     return {
         "installed": _p.cuda_pack_ready(cdir),
         "dir": str(cdir),
-        "gate_ok": gate_ok,
-        "gate_reason": None if gate_ok else
-            _i18n.ui("还没有装载任何可用的模型组合——先下载模型或从目录装载",
-                  "no usable model pair is loaded yet — download or load a model first"),
-        "model_variants": scan.get("variants") or [],
-        "tokenizer": (scan.get("tokenizer") or {}).get("preferred"),
+        "gate_ok": True,
+        "gate_reason": None,
+        "model_variants": [],
+        "tokenizer": None,
     }
+
+
+def _canonical(path: Path) -> str:
+    """Realpath + normcase: junctions, symlinks and 8.3 short-name games
+    cannot smuggle an outside folder past the whitelist comparisons."""
+    try:
+        return os.path.normcase(os.path.realpath(str(path)))
+    except OSError:
+        return os.path.normcase(str(path))
+
+
+def _inside(root: Path, f: Path) -> bool:
+    """True only when f resolves STRICTLY inside root (never equal, never
+    escaping through a crafted ../ or a link)."""
+    r, c = _canonical(root), _canonical(f)
+    return c != r and c.startswith(r + os.sep)
+
+
+def _sha256_of(f: Path) -> Optional[str]:
+    try:
+        h = hashlib.sha256()
+        with open(f, "rb") as fp:
+            for chunk in iter(lambda: fp.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def _read_pack_manifest(cdir: Path,
+                        kind: str = "gpu") -> Optional[Dict[str, Any]]:
+    try:
+        man = json.loads((cdir / PACK_MANIFEST).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return man if isinstance(man, dict) and str(man.get("kind")) == kind else None
+
+
+def uninstall_by_manifest(target: Path,
+                          man: Dict[str, Any]):
+    """The one reverse-removal loop every manifest-carrying install shares
+    (gpu pack / stt model cache / any future kind). Walks the snapshot and
+    removes EXACTLY its files, after re-verifying each entry: a relative
+    path may not escape the folder (../, absolute, drive letters stay
+    KEPT), a file whose bytes changed since install is not ours anymore
+    and stays KEPT, and a file the manifest never mentions is untouchable.
+    Directories left empty go too (deepest first, never blindly), and the
+    folder itself is rmdir'd only when truly empty — user files keep it
+    alive. A file locked right now aborts with "in_use": honest about
+    what already went, never a rmtree over a live handle.
+    Returns (removed_count, kept_paths, error_or_None)."""
+    removed, kept = 0, []
+    for entry in (man.get("files") or []):
+        rel = str(entry.get("path") or "")
+        f = None
+        if rel and not rel.startswith(("/", "\\")) and ":" not in rel:
+            f = target / Path(*rel.split("/"))
+        if f is None or not _inside(target, f):
+            kept.append(rel or "?")
+            continue
+        if not f.is_file():
+            continue  # already gone — nothing to remove
+        if (int(entry.get("size") or -1) != f.stat().st_size
+                or _sha256_of(f) != str(entry.get("sha256") or "")):
+            kept.append(rel)  # bytes changed since install: not ours anymore
+            continue
+        try:
+            f.unlink()
+            removed += 1
+        except PermissionError:
+            return removed, kept + [rel], "in_use"
+        except OSError:
+            kept.append(rel)
+    # our manifest ledger has served its purpose — it goes with the pack.
+    # unlink(missing_ok=True) never raises FileNotFoundError, so no dir
+    # entry survives to block the final rmdir; a PermissionError here is
+    # rare but decisive — we then honestly report not_empty below.
+    try:
+        (target / PACK_MANIFEST).unlink(missing_ok=True)
+    except OSError:
+        pass
+    # take the directories WE emptied, deepest first — the walk's LAST root
+    # is the target itself, so it gets removed right here when empty;
+    # anything a user file still occupies refuses on its own and stays
+    for root, _d, _f in os.walk(target, topdown=False):
+        try:
+            os.rmdir(root)
+        except OSError:
+            pass
+    if not target.exists():
+        return removed, kept, None      # walk already carried the empty dir off
+    # something survived — list EVERY file still inside (manifest strays
+    # included: the user's own notes were never in it, yet the report is
+    # more honest for naming them) so the caller can show what remains
+    try:
+        survivors = {p.relative_to(target).as_posix()
+                     for p in target.rglob("*") if p.is_file()}
+        for rel in survivors - set(kept):
+            kept.append(rel)
+    except OSError:
+        pass
+    kept.append("<dir not empty>")
+    return removed, kept, "not_empty"
+
+
+def uninstall_gpu() -> Dict[str, Any]:
+    """Reverse-uninstall the CUDA pack along the install path the LEDGER
+    recorded — the DLL root lives wherever the installer wrote it back
+    then (HERMES_HOME, or the plugin-dir fallback when that was not
+    writable), which on a user's machine need not equal what
+    cuda_pack_dir() infers today. The target NEVER roams: a recorded
+    path that is missing, relative, oddly named or living under any
+    parent outside the two roots the installer itself may use (whitelist
+    compared via realpath) is refused outright — falling back to
+    "today's guess" is how unrelated user folders die.
+
+    Deletion is MANIFEST-DRIVEN: the installer inventoried every file it
+    placed (relative path + size + sha256) inside the pack dir, and the
+    uninstall removes exactly those, after re-checking each path stays
+    strictly inside the root. A file whose bytes changed since install
+    is left alone (the user may have made it theirs); a file the
+    manifest never mentions is never deleted; the folder itself is only
+    rmdir'd when truly empty. Packs installed before manifests existed
+    fall back to whole-dir removal, still gated by the parent whitelist
+    plus the core-DLL signature. A DLL held by a live synthesis worker
+    blocks everything: qwen.dll is probed for exclusive access FIRST,
+    so a busy engine can never leave half a pack behind. Idempotent: a
+    missing dir counts as already removed."""
+    st = load_state()
+    if _busy(st):
+        return {"ok": False, "reason": "busy"}
+    pack_root = _p.cuda_pack_dir()
+    allowed = {_canonical(pack_root.parent), _canonical(_p.plugin_root())}
+    chapter = st if (st and str(st.get("kind") or "") == "gpu") else None
+    if chapter is not None:
+        t = Path(str(chapter.get("target") or ""))
+        if not (t.is_absolute() and t.name == pack_root.name
+                and _canonical(t.parent) in allowed):
+            return {"ok": False, "reason": "not_pack"}
+        target = t
+    else:
+        target = pack_root
+    if not target.is_dir():
+        _log.info(_i18n.ui("GPU 卸载: %s 本就不存在", "gpu uninstall: %s already gone"), target)
+        if chapter is not None:
+            try:
+                _state_file().unlink(missing_ok=True)
+                _cancel_marker().unlink(missing_ok=True)
+            except OSError:
+                pass
+        return {"ok": True, "removed": None}
+    if not (target / "qwen.dll").is_file() or not (target / "ggml-cuda.dll").is_file():
+        # not our pack — refuse, never guess
+        return {"ok": False, "reason": "not_pack"}
+    try:  # a loaded DLL refuses an exclusive reopen: engine alive => not now
+        with open(target / "qwen.dll", "r+b"):
+            pass
+    except PermissionError:
+        return {"ok": False, "reason": "in_use"}
+    except OSError:
+        pass  # odd but not locked-looking; the removal below decides
+    # Re-check right before cutting: a worker may have mapped the DLLs in
+    # the probe→removal gap. Deleting files a live process has mapped is
+    # Windows' classic silent footgun, so this lock check must be
+    # immediately adjacent to the removal, not merely earlier.
+    try:
+        with open(target / "qwen.dll", "r+b"):
+            pass
+        with open(target / "ggml-cuda.dll", "r+b"):
+            pass
+    except PermissionError:
+        return {"ok": False, "reason": "in_use"}
+    except OSError:
+        pass
+    man = _read_pack_manifest(target)
+    removed = 0
+    kept: List[str] = []
+    if man is not None:
+        # one shared manifest-driven loop for every install kind
+        removed, kept, perr = uninstall_by_manifest(target, man)
+        if perr == "in_use":
+            return {"ok": False, "reason": "in_use", "removed": removed,
+                    "kept": kept}
+    else:
+        # pre-manifest pack: the parent whitelist + core-DLL signature
+        # above are the warrant; the dir was created by our installer.
+        try:
+            shutil.rmtree(target)
+        except PermissionError:
+            return {"ok": False, "reason": "in_use", "removed": 0, "kept": []}
+        except OSError as e:
+            return {"ok": False, "reason": "io",
+                    "detail": f"{type(e).__name__}: {str(e)[:120]}"}
+        removed = -1  # whole directory
+    parent = target.parent
+    for crumb in (parent / GPU_ASSET, Path(str(parent / GPU_ASSET) + ".part"),
+                  target.with_name(target.name + ".new"),
+                  target.with_name(target.name + ".old")):
+        try:
+            if crumb.is_file():
+                crumb.unlink()
+            elif crumb.is_dir():
+                shutil.rmtree(crumb, ignore_errors=True)
+        except OSError:
+            pass
+    if st and str(st.get("kind") or "") == "gpu":
+        try:
+            _state_file().unlink(missing_ok=True)
+            _cancel_marker().unlink(missing_ok=True)
+        except OSError:
+            pass
+    _log.info(_i18n.ui("GPU 已卸载: %s（删除=%s 保留=%s）",
+                     "gpu uninstalled: %s (files=%s kept=%s)"),
+            target, removed, kept)
+    return {"ok": True, "removed": str(target), "files_removed": removed,
+            "kept": kept}
+
+
+# ---- wake-word KWS model pipeline (official k2-fsa kws-models release) ----
+# Why this exists at all (owner's matrix, 2026-11-20): the host's own
+# wake_word machinery auto-downloads ONLY the English gigaspeech model,
+# GitHub-direct with no mirror and no resume — and it NEVER fetches the
+# Chinese wenetspeech model, so a Chinese wake word on a fresh install
+# simply stays silent. The api save bridge calls HERE to fetch the right
+# model for the saved phrase's language, verify the official SHA256
+# (pinned below, straight from the release's checksum.txt), unpack into
+# HERMES_HOME/cache/wakewords/<official-dir>/ — the very root the host
+# itself uses and its readiness scan (tokens.txt) accepts, so nothing
+# here is private state the host cannot see — and point
+# wake_word.sherpa.model_dir at it. Same three legs as the GPU pack;
+# the .part lives next to the same repo path on every leg, so leg
+# switches resume instead of restarting.
+
+WAKE_REPO = "k2-fsa/sherpa-onnx"
+WAKE_TAG = "kws-models"
+WAKE_MODELS: Dict[str, Dict[str, Any]] = {
+    "en": {"file": "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2",
+           "dir": "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01",
+           "bytes": 17626723,
+           "sha": "f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a"},
+    "zh": {"file": "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2",
+           "dir": "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01",
+           "bytes": 32654866,
+           "sha": "b2f7c89690dc8ce4c6ed6afeab7cd800c36ad1421fb6b6302b4a4b194cf7f35f"},
+}
+
+
+def wake_model_dirname(lang: str) -> str:
+    return str((WAKE_MODELS.get(lang) or {}).get("dir") or "")
+
+
+def wake_model_root() -> Path:
+    """Official sherpa-KWS cache root: HERMES_HOME/cache/wakewords. The host
+    (_ensure_sherpa_model) downloads into this same root, and the per-model
+    folder names below are the release's own dir names, so models placed by
+    this pipeline pass the host's own readiness scan unchanged."""
+    home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+    return Path(home) / "cache" / "wakewords"
+
+
+def wake_model_ready(lang: str) -> bool:
+    m = WAKE_MODELS.get(lang)
+    if not m:
+        return False
+    d = wake_model_root() / str(m["dir"])
+    # host readiness = tokens.txt present; we additionally require the three
+    # onnx parts so a half-extracted or half-deleted folder can never flip
+    # the panel's green light
+    if not (d / "tokens.txt").is_file():
+        return False
+    for part in ("encoder", "decoder", "joiner"):
+        if not any(d.glob(f"{part}*.onnx")):
+            return False
+    return True
+
+
+def _wake_urls(base: str, name: str) -> str:
+    return f"{base}/{WAKE_REPO}/releases/download/{WAKE_TAG}/{name}"
+
+
+def pick_wake_endpoint(name: str, size: Optional[int],
+                       exclude: Optional[set] = None):
+    """Clone of pick_gpu_endpoint for the KWS tarballs: real-file Range
+    probes, head+body@1/3 sampling, GitHub's generous ramp window (the
+    WARP-tunnel leg needs it), tight windows for the local mirrors.
+    Kept separate on purpose — the GPU path is field-proven and stays
+    untouched."""
+    start = (size // 3) if (size and size >= 12 * 1024 * 1024) else 0
+    urls = {c: _wake_urls(c, name) for c in GPU_ENDPOINTS
+            if not exclude or c not in exclude}
+
+    def _score(c: str, u: str):
+        if c == GPU_GITHUB:
+            return _probe_leg(u, budget=_GPU_BIG["budget"],
+                              want=_GPU_BIG["want"], start=start)
+        return _probe_leg(u, start=start)
+
+    scores = {c: _score(c, u) for c, u in urls.items()}
+    _log.info(_i18n.ui("唤醒模型腿探针 @%sB: %s（排除=%s）",
+                       "wake-model leg probe @%sB: %s (excluded=%s)"),
+              start,
+              {k: (round(v, 2) if v is not None else None)
+               for k, v in scores.items()},
+              sorted(exclude or ()) or "-")
+    live = {k: v for k, v in scores.items() if v is not None}
+    if not live:
+        raise NoEndpointError(
+            "no wake-model leg can stream bytes right now — tried "
+            f"{sorted(urls) or 'nothing (all legs already burned this run)'}")
+    best = min(live, key=lambda k: live[k])
+    return best, scores
+
+
+def _wake_write_config(lang: str, model_dir: Path) -> None:
+    """Point the host's wake engine at the placed model.
+
+    The key the host ACTUALLY reads to pick the engine is
+    ``wake_word.provider`` (tools/wake_word.py ``_provider()`` reads the
+    "provider" key, default "auto"; "sherpa" is one of its ``_PROVIDERS``).
+    ``wake_word.engine`` is kept as the panel-side display alias only —
+    writing engine ALONE was the 2026-11-20 incident: config said
+    engine=sherpa, the host still saw provider="auto", armed openwakeword
+    and the Chinese wake phrase never fired. Both keys are written so host
+    and panel agree. The model dir is pinned through the official sub-key
+    ``wake_word.sherpa.model_dir``. Merge write: the phrase and every
+    other key stand untouched."""
+    try:
+        from hermes_cli.config import load_config, save_config
+        cfg = load_config() or {}
+        ww = cfg.get("wake_word")
+        if not isinstance(ww, dict):
+            ww = {}
+        ww["provider"] = "sherpa"  # what the host wake gate reads
+        ww["engine"] = "sherpa"    # panel display alias, kept in sync
+        sh = ww.get("sherpa")
+        if not isinstance(sh, dict):
+            sh = {}
+        sh["model_dir"] = str(model_dir)
+        ww["sherpa"] = sh
+        cfg["wake_word"] = ww
+        save_config(cfg)
+        _log.info(_i18n.ui("唤醒配置已写入: provider=sherpa model_dir=%s",
+                           "wake config written: provider=sherpa model_dir=%s"),
+                  model_dir)
+    except Exception as e:  # never kill the job over a config hiccup
+        _log.warning(_i18n.ui("唤醒配置写入失败: %s", "wake config write failed: %s"), e)
+
+
+def _wake_extract_tar_bz2(tar_path: Path, dest: Path) -> Optional[str]:
+    """Unpack the official .tar.bz2, stripping the single top-level folder
+    the release wraps its files in, then swap it into place atomically:
+    staging dir first, old copy (if any) renamed aside, new one moved in,
+    aside deleted. Any shape error aborts with a message and leaves the
+    previous model intact — a half unpack never replaces a working one."""
+    staging = dest.with_name(dest.name + ".new")
+    shutil.rmtree(staging, ignore_errors=True)
+    try:
+        staging.mkdir(parents=True)
+        with tarfile.open(tar_path, "r:bz2") as tf:
+            try:
+                tf.extractall(staging, filter="data")  # py3.12+: blocks ../ escapes
+            except TypeError:
+                tf.extractall(staging)
+        sub = [p for p in staging.iterdir() if p.is_dir()]
+        loose = [p for p in staging.iterdir() if p.is_file()]
+        payload = staging
+        if len(sub) == 1 and not loose:
+            payload = sub[0]  # the release's wrapper folder — strip it
+        if dest.exists():
+            aside = dest.with_name(dest.name + ".old")
+            shutil.rmtree(aside, ignore_errors=True)
+            os.replace(dest, aside)
+        try:
+            os.replace(payload, dest)
+        except OSError:
+            # swap failed — put the old model back so nothing regressed
+            if 'aside' in locals() and aside.exists() and not dest.exists():
+                os.replace(aside, dest)
+            raise
+        if 'aside' in locals():
+            shutil.rmtree(aside, ignore_errors=True)
+        return None
+    except Exception as e:
+        shutil.rmtree(staging, ignore_errors=True)
+        return f"{type(e).__name__}: {str(e)[:140]}"
+
+
+def _run_wake(st: Dict[str, Any]) -> None:
+    """Full re-enterable wake-model job (fresh start AND resume share this
+    entry): probe legs -> Range-resume download with official-sha check ->
+    atomic tar.bz2 unpack -> write engine=sherpa + model_dir."""
+    lang = str(st.get("lang") or "")
+    m = WAKE_MODELS.get(lang) or {}
+    name = str(m.get("file") or "")
+    dest = Path(str(st.get("target") or ""))
+    try:
+        if not name or not str(st.get("target") or ""):
+            raise RuntimeError("wake job state missing model/target")
+        if wake_model_ready(lang):
+            # someone/something already placed it — just (re)point config
+            _wake_write_config(lang, dest)
+            st.update(state="done", pct=100.0, note=None,
+                      done_bytes=st.get("total_bytes") or m.get("bytes") or 0)
+            _save(st)
+            return
+        crumb = dest.parent
+        crumb.mkdir(parents=True, exist_ok=True)
+        part = crumb / (name + ".part")
+        total = int(m.get("bytes") or 0) or None
+        want_sha = str(m.get("sha") or "") or None
+        dead: set = set()
+        while True:
+            try:
+                base, scores = pick_wake_endpoint(name, total, exclude=dead)
+            except NoEndpointError as e:
+                st.update(state="error", note=_i18n.ui(
+                    "三条腿都下不动唤醒模型——检查网络后点重试（免费镜像线路白天波动，稍后再试往往就通）",
+                    "no wake-model leg can stream right now — check the "
+                    "network and retry; free mirror legs fluctuate and "
+                    "recover. Details: ") + str(e)[:120])
+                _save(st)
+                return
+            st["endpoint"] = base
+            _oth = [v for k, v in scores.items() if k != base and v]
+            oth_line = (0.4 * 1048576.0 / min(_oth)) if _oth else None
+            st["steps_total"] = 1
+            st["base_bytes"] = 0
+            st["total_bytes"] = total or 0
+            st["step_label"] = name
+            _save(st)
+            _log.info(_i18n.ui("唤醒模型拉取轮次: 腿=%s 总量=%s B 续传=%s B 死腿=%s",
+                               "wake round: leg=%s total=%s B resume=%s B dead=%s"),
+                      base, total, int(st.get("done_bytes") or 0),
+                      sorted(dead) or "-")
+            res = _download_into(_wake_urls(base, name), part, st,
+                                 want_sha=want_sha, total_hint=total,
+                                 others_best_Bps=oth_line)
+            if res == "cancelled":
+                _save(st)
+                return
+            if res == "ok":
+                break
+            dead.add(base)
+            if len(dead) >= len(GPU_ENDPOINTS):
+                st.update(state="interrupted", note=_i18n.ui(
+                    "三条腿都试过一轮没走通——进度还在，按重试会重新测速换腿",
+                    "every leg was tried this round — progress kept; press "
+                    "retry to re-probe all legs"))
+                _save(st)
+                return
+            st.update(state="running", mbps=None, eta_s=None,
+                      note=_i18n.ui("这条腿断了——自动换下一条腿续传（进度不丢）",
+                                    "this leg died — auto-switching to the "
+                                    "next leg, progress kept"))
+            _save(st)
+        st.update(state="extracting", step_label=None, mbps=None, eta_s=None)
+        _save(st)
+        err = _wake_extract_tar_bz2(part, dest)
+        if err is None and not wake_model_ready(lang):
+            err = "extracted model failed the completeness check"
+        try:
+            part.unlink(missing_ok=True)
+        except OSError:
+            pass
+        if err:
+            st.update(state="error", note=err)
+        else:
+            _wake_write_config(lang, dest)
+            st.update(state="done", note=None, pct=100.0,
+                      done_bytes=st.get("total_bytes"))
+        _save(st)
+    except Exception as e:
+        st.update(state="error", note=f"{type(e).__name__}: {str(e)[:160]}")
+        _save(st)
+
+
+def start_wake_model_download(lang: str, phrase: str) -> Dict[str, Any]:
+    """Kick the KWS model job for one language. Ready models never
+    re-download; a running job (of ANY kind — one download ledger) says
+    busy and the panel just rides the other progress bar."""
+    m = WAKE_MODELS.get(lang)
+    if not m:
+        return {"ok": False, "detail": "unknown wake model language"}
+    with _LOCK:
+        st = load_state()
+        if _busy(st):
+            return {"ok": False, "busy": True,
+                    "detail": _i18n.ui("已有一个下载任务在跑——先等它完成或取消它",
+                                       "a download is already running — "
+                                       "wait for it or cancel it")}
+        if wake_model_ready(lang):
+            return {"ok": True, "ready": True}
+        st = _new_state("wake", str(wake_model_root() / str(m["dir"])))
+        st.update(lang=lang, phrase=str(phrase or ""))
+        _save(st)
+        threading.Thread(target=_run_wake, args=(st,), daemon=True,
+                         name="yache-dl-wake").start()
+        return {"ok": True, "started": True}
+
+
+def wake_model_status() -> Dict[str, Any]:
+    """Panel view of the wake job only: any other kind (or none) reads
+    idle, so the wake panel never paints the CUDA/model wizard's progress."""
+    st = download_status()
+    if str(st.get("kind") or "") != "wake":
+        return {"state": "idle"}
+    return st
 
 
 def download_status() -> Dict[str, Any]:

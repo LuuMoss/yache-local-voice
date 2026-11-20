@@ -84,7 +84,7 @@ def tts_base_dir() -> Path:
 
 def plugin_root() -> Path:
     """This plugin's install dir: <HERMES_HOME>/plugins/yache-local-voice."""
-    return Path(__file__).resolve().parents[2]
+    return Path(__file__).resolve().parents[1]
 
 
 def cuda_pack_ready(d: Path) -> bool:
@@ -142,6 +142,27 @@ def engine_site_packages(base: Path | None = None) -> Path:
     return plugin_root() / "vendor"
 
 
+def worker_env(python_path: Path | None = None) -> dict:
+    """Environment for spawning engine worker children.
+
+    The PYTHONPATH/PYTHONHOME strip exists to stop the gateway leaking its
+    harness site-packages into an ENGINE VENV child, where they shadow the
+    venv's own numpy (cp314 host .pyd vs cp312 engine .pyd, 2026-11-05).
+    But in the release layout there is no venv: the worker runs on the
+    gateway's own python and its numpy arrives through that very PYTHONPATH —
+    stripping it unconditionally starved the worker on a fresh machine
+    ("No module named 'numpy'", 2026-11-19 field report).  So strip only when
+    the child python is NOT the host's: same interpreter = same environment,
+    no .pyd version skew is possible.
+    """
+    env = dict(os.environ)
+    py = str(python_path or engine_python())
+    if py.lower() != str(Path(sys.executable)).lower():
+        env.pop("PYTHONPATH", None)
+        env.pop("PYTHONHOME", None)
+    return env
+
+
 def dll_search_dir(base: Path | None = None) -> Path:
     """Directory holding qwen.dll (+ CUDA runtime companions)."""
     env = os.environ.get("QWEN3_TTS_DLL_DIR", "").strip()
@@ -157,7 +178,17 @@ def dll_search_dir(base: Path | None = None) -> Path:
 
 
 def model_paths() -> tuple[Path, Path]:
-    """(talker_gguf, tokenizer_gguf) — env / data-file overridable."""
+    """(talker_gguf, tokenizer_gguf) — env / data-file overridable.
+
+    Self-adaptive fallback (2026-11-20): when the resolved pair (typically the
+    Q8_0 default filenames) is not physically present under ``<base>/models``,
+    fall back to an *actually installed* tier pair — user-pinned ``quant`` tier
+    first, then TIER_ORDER high→low. The wake gatekeeper (provider.is_available),
+    the worker and the panel all share this single source of truth, so a models/
+    dir that only holds e.g. the Q4_K_M pair is no longer judged "text-to-speech
+    not configured" just because the default filenames miss the disk. Explicit
+    env / data-file overrides still win whenever their files exist.
+    """
     base = tts_base_dir()
     data = load_data()
     talker = (os.environ.get("QWEN3_TTS_TALKER", "").strip()
@@ -170,6 +201,14 @@ def model_paths() -> tuple[Path, Path]:
         talker = str(base / "models" / talker)
     if not os.path.isabs(tokenizer):
         tokenizer = str(base / "models" / tokenizer)
+    if not (os.path.isfile(talker) and os.path.isfile(tokenizer)):
+        pinned = selected_quant()  # data-file "quant" pin (tier name), if any
+        for _tier in ([pinned] if pinned else []) + [
+                t for t in TIER_ORDER if t != pinned]:
+            _t, _k = tier_paths(_tier)
+            if _t.is_file() and _k.is_file():
+                talker, tokenizer = str(_t), str(_k)
+                break
     return Path(talker), Path(tokenizer)
 
 

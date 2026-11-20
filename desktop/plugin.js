@@ -184,6 +184,15 @@ const LOCALES = {
       wiz_prog: (p, m, e) => `${p}% · ${m} MB/s · 剩余 ${e}`,
       wiz_eta_calc: '计算中',
       wiz_done: '下载完成，已自动装载进本地语音。',
+      wiz_gpu_done: '加速包已装好——检测到 CUDA 引擎。',
+      wiz_extracting: '正在解压部署加速引擎…（几十秒，请稍候）',
+      wiz_uninstall: '卸载加速包',
+wiz_uninstall_confirm: '确认卸载？（8 个 CUDA DLL，几秒完成）',
+wiz_uninstalled: 'CUDA 引擎已卸载——需要时点下方按钮随时装回。',
+      wiz_uninstall_busy: '下载向导正在运行，等它结束再卸载。',
+      wiz_uninstall_in_use: '语音合成正在使用 CUDA 引擎，请待合成结束后再试。',
+      wiz_uninstall_not_pack: '该目录不像本插件装的加速包，已保护性跳过（未删除任何文件）。',
+      wiz_uninstall_io: '卸载失败（文件被占用或权限不足），请稍后重试。',
       wiz_gpu_title: 'GPU 加速包（可选 · 提速用）',
       wiz_gpu_on: '已安装 · CUDA 提速生效中',
       wiz_gpu_off: '未安装 · CPU 也能出声；装上后快很多。',
@@ -205,6 +214,12 @@ const LOCALES = {
       stt_env_prog: (s, pct, el) => `${s} · ${pct}% · 已用 ${el}s`,
       stt_env_done: 'ASR 环境已就绪',
       stt_env_fail: '环境安装失败：',
+      stt_env_unfail: '环境卸载失败：',
+      open_log: '打开日志',
+      open_log_fail: '打开日志失败：',
+      stt_env_uninstall: '卸载环境',
+      stt_env_uninstall_confirm: '再点一次确认卸载',
+      stt_env_uninstalled: 'ASR 环境已卸下——模型缓存仍保留，想清盘子可在模型区单独删除。',
       stt_env_disk: (gb) => `提醒：目标磁盘只剩 ${gb} GB，环境加模型至少要 1.5 GB，先清一清再装。`,
       stt_env_other: (py) => `注：当前生效的其实是外部 Python：${py}`,
       stt_retry: '重新体检',
@@ -250,6 +265,7 @@ const LOCALES = {
       mdl_title: '模型目录',
       mdl_hint: '告诉雅澈模型放在哪里：选包含 qwen-talker-1.7b-*.gguf 的文件夹（选外层目录或 models 子目录都可以，会自动识别）。「读取」会真实扫描该目录，扫描通过才会生效；引擎每句话都重读目录，切换即时生效、无需重启。',
       mdl_ph: '模型目录路径（也可以直接粘贴）',
+      mdl_fresh: '模型还没就位——用上方下载中心挑个您想要的目录下载（不必装在 C 盘），下完会自动装载到这里；本地已有模型的话点「选目录」指过去再点「读取」装载',
       mdl_pick: '选目录',
       mdl_read: '读取',
       mdl_reset: '恢复默认',
@@ -447,6 +463,15 @@ const LOCALES = {
       wiz_prog: (p, m, e) => `${p}% · ${m} MB/s · ETA ${e}`,
       wiz_eta_calc: 'calculating',
       wiz_done: 'Downloaded and auto-loaded into local voice.',
+      wiz_gpu_done: 'Accelerator pack installed — CUDA engine detected.',
+      wiz_extracting: 'Unpacking and deploying the CUDA engine… (a minute or so)',
+      wiz_uninstall: 'Uninstall accelerator pack',
+wiz_uninstall_confirm: 'Confirm uninstall? (8 CUDA DLLs, a few seconds)',
+wiz_uninstalled: 'CUDA engine uninstalled — re-install it anytime with the button below.',
+      wiz_uninstall_busy: 'The download wizard is running — wait for it to finish before uninstalling.',
+      wiz_uninstall_in_use: 'A synthesis is using the CUDA engine — try again once it finishes.',
+      wiz_uninstall_not_pack: 'That folder does not look like this plugin’s accelerator pack — nothing was deleted.',
+      wiz_uninstall_io: 'Uninstall failed (file locked or permission denied) — try again shortly.',
       wiz_gpu_title: 'GPU accelerator pack (optional)',
       wiz_gpu_on: 'Installed · CUDA acceleration active',
       wiz_gpu_off: 'Not installed · CPU voice works; this makes it much faster.',
@@ -468,6 +493,12 @@ const LOCALES = {
       stt_env_prog: (s, pct, el) => `${s} · ${pct}% · ${el}s elapsed`,
       stt_env_done: 'ASR environment is ready',
       stt_env_fail: 'environment install failed: ',
+      stt_env_unfail: 'environment uninstall failed: ',
+      open_log: 'Open log',
+      open_log_fail: 'could not open the log: ',
+      stt_env_uninstall: 'Uninstall environment',
+      stt_env_uninstall_confirm: 'Click again to confirm uninstall',
+      stt_env_uninstalled: 'ASR environment removed — the model cache stays; delete it separately in the model row if you like.',
       stt_env_disk: (gb) => `Heads-up: only ${gb} GB free on the target disk — environment plus models need at least 1.5 GB.`,
       stt_env_other: (py) => `Note: the interpreter actually in use is an outside Python: ${py}`,
       stt_retry: 'Re-check',
@@ -513,6 +544,7 @@ const LOCALES = {
       mdl_title: 'Model directory',
       mdl_hint: 'Tell Yache where the models live: Pick the folder containing qwen-talker-1.7b-*.gguf (the parent folder or the models/ subfolder both work). "Read" really reads the folder and only applies on success; the engine re-reads this per utterance, so switching is instant — no restart needed.',
       mdl_ph: 'Model folder path (pasting is fine too)',
+      mdl_fresh: 'No model yet — use the download wizard above and pick any folder you like (no need to keep it on C:); it auto-loads here when done. Already have models somewhere? Pick that folder and hit "Read" to load it.',
       mdl_pick: 'Choose',
       mdl_read: 'Read',
       mdl_reset: 'Use default',
@@ -1222,20 +1254,65 @@ function EnvRow({ ctx, t, onReady }) {
   const install = useCallback(async (rebuild) => {
     if (busy) return;
     setBusy(true); setJob(null);
+    // A "busy" rejection from the server is NOT a failure — a worker is
+    // live (double click, or another window started it). Adopt that live
+    // job so the progress bar re-attaches instead of painting a scary red
+    // "安装失败:正在安装中". Only a real no-worker answer counts as error.
+    const failUnlessLive = async (msg) => {
+      try {
+        const live = await ctx.rest('/stt/env/install/status', { timeoutMs: 8000 });
+        if (live && live.state === 'running') { setJob(live); return; }
+      } catch (e) { /* probe failed — fall through to the honest error */ }
+      setBusy(false);
+      setJob({ state: 'error', error: msg });
+      load();
+    };
     try {
       const r = await ctx.rest('/stt/env/install', { method: 'POST',
         timeoutMs: 60000, body: { rebuild: !!rebuild } });
       if (!r || !r.ok) {
+        await failUnlessLive(String((r && (r.error || r.detail)) || 'HTTP error'));
+      }
+    } catch (err) {
+      await failUnlessLive(String((err && err.message) || err));
+    }
+  }, [ctx, busy, load]);
+
+  // The loop closes both ways: an installed environment must be removable
+  // from the same place it was installed. Two-step inline confirm (no
+  // dialog — owner's standing rule), amber on the arming click. Removal
+  // runs server-side against the install-time snapshot: the folder is
+  // wholly ours (its runtime __pycache__ files are part of the install,
+  // not user data), so the backend identifies it first, then takes the
+  // whole tree down — model cache and everything else stay untouched.
+  const [unarm, setUnarm] = useState(0);
+  const unarmTimer = useRef(null);
+  const uninstall = useCallback(async () => {
+    if (unarm === 0) {
+      setUnarm(1);
+      clearTimeout(unarmTimer.current);
+      unarmTimer.current = setTimeout(() => setUnarm(0), 3000);
+      return;
+    }
+    clearTimeout(unarmTimer.current); setUnarm(0);
+    if (busy) return;
+    setBusy(true); setJob(null);
+    try {
+      const r = await ctx.rest('/stt/env/uninstall',
+        { method: 'POST', timeoutMs: 120000 });
+      if (r && r.ok) { setBusy(false); setJob(null); load(); }
+      else {
         setBusy(false);
-        setJob({ state: 'error',
-          error: String((r && (r.error || r.detail)) || 'HTTP error') });
+        setJob({ state: 'error', src: 'uninstall',
+          error: String((r && (r.error || r.detail)) || 'failed') });
         load();
       }
     } catch (err) {
       setBusy(false);
-      setJob({ state: 'error', error: String((err && err.message) || err) });
+      setJob({ state: 'error', src: 'uninstall',
+        error: String((err && err.message) || err) });
     }
-  }, [ctx, busy, load]);
+  }, [unarm, busy, ctx, load]);
 
   const step = (k) => (k === 'wipe' ? t('yache.stt_env_wipe')
     : k === 'venv' ? t('yache.stt_env_venv')
@@ -1293,8 +1370,19 @@ function EnvRow({ ctx, t, onReady }) {
     !busy && env && st === 'ready' ? jsx(Button, {
       className: 'w-full', size: 'xs', variant: 'outline',
       onClick: () => install(true), children: t('yache.stt_env_rebuild') }) : null,
+    // A folder on disk? Offer the way back out — the loop closes both
+    // ways (ready / deps / broken all have something to remove). Two-step
+    // inline confirm, amber on the arming click — no dialog, per owner's
+    // standing rule; amber-400 is the owner's alert color.
+    !busy && env && st !== 'missing' ? jsx(Button, {
+      className: 'w-full', size: 'xs', variant: 'outline',
+      style: unarm === 1 ? { borderColor: '#fbbf24', color: '#fbbf24' } : undefined,
+      onClick: uninstall,
+      children: t(unarm === 1 ? 'yache.stt_env_uninstall_confirm'
+                              : 'yache.stt_env_uninstall') }) : null,
     failed ? jsx('p', { className: 'whitespace-pre-wrap text-[11px] text-rose-500',
-      children: t('yache.stt_env_fail')
+      children: (job && job.src === 'uninstall'
+        ? t('yache.stt_env_unfail') : t('yache.stt_env_fail'))
         + String((job && job.error) || '') }) : null,
     failed && tail ? jsx('pre', {
       className: 'max-h-24 overflow-auto whitespace-pre-wrap break-all rounded bg-muted/50 p-1.5 text-[10px] leading-snug text-muted-foreground',
@@ -1708,6 +1796,13 @@ function WakeBody({ ctx, t, st }) {
    saving runs a real synthesis first and only then writes. The saved
    selection is exactly what unlocks the TTS synthesis section, because
    tier/quality can only be judged against a voice that actually exists. */
+/* The wizard ledger has three transient states — bytes flowing (`running`),
+   source speed test (`probing`) and CUDA pack unpack + DLL deploy
+   (`extracting`) — and the progress poll must stay alive through ALL of
+   them, not just `running`. When it died on the others, `done` was never
+   seen and the accelerator light only lit after closing and reopening the
+   panel (owner report, 11-19). Anything else in the ledger is final. */
+const DL_ACTIVE = (s) => s === 'running' || s === 'probing' || s === 'extracting';
 function DownloadSection({ ctx, t, lib, refreshLib }) {
   // Guided download for users with nothing local yet: two dropdowns
   // (model x quantization) with a live size/memory estimate, a folder
@@ -1722,6 +1817,7 @@ function DownloadSection({ ctx, t, lib, refreshLib }) {
   const [dlp, setDlp] = useState(null);     // wizard/status payload
   const [gpu, setGpu] = useState(null);     // wizard/gpu payload
   const [canceling, setCanceling] = useState(false);
+  const [uninst, setUninst] = useState(0);    // 0 idle · 1 armed (second click confirms)
   const [note, setNote] = useState('');
   const running = !!dlp && dlp.state === 'running';
   const eta = (s) => s == null || s <= 0 ? t('yache.wiz_eta_calc')
@@ -1748,15 +1844,20 @@ function DownloadSection({ ctx, t, lib, refreshLib }) {
     loadGpu();
     ctx.rest('/wizard/status').then((r) => { if (r && r.state && r.state !== 'idle') setDlp(r); }).catch((e) => dbg('wizard/status boot', e));
   }, []);
-  // While a download runs, poll the one-second progress like the STT page.
+  // While any download is in a transient state, poll the one-second
+  // progress — including `extracting`: the CUDA pack's last beat is a
+  // ~15 s DLL deploy, and the old `running`-only condition died exactly
+  // there, so `done` (and with it loadGpu/refreshLib) never fired in
+  // place. Terminal states stop the poll; `done` refreshes the lights.
   useEffect(() => {
-    if (!dlp || dlp.state !== 'running') return;
+    if (!dlp || !DL_ACTIVE(dlp.state)) return;
     const iv = setInterval(() => {
       ctx.rest('/wizard/status').then((r) => {
         if (!r) return;
         setDlp(r);
         if (r.state === 'done') {
-          setNote(t('yache.wiz_done'));
+          setNote(String(r.target || '').includes('yache-cuda')
+            ? t('yache.wiz_gpu_done') : t('yache.wiz_done'));
           refreshLib(); loadGpu();
         } else if (r.state === 'cancelled' || r.state === 'interrupted') {
           loadGpu();
@@ -1764,7 +1865,7 @@ function DownloadSection({ ctx, t, lib, refreshLib }) {
       }).catch(() => {});
     }, 1000);
     return () => clearInterval(iv);
-  }, [dlp && dlp.state === 'running']);
+  }, [!!dlp && DL_ACTIVE(dlp.state)]);
   const startProbe = () => {
     setSrcs({ phase: 'probe' });
     ctx.rest('/wizard/source').then((r) => {
@@ -1808,6 +1909,30 @@ function DownloadSection({ ctx, t, lib, refreshLib }) {
       else setNote(String((r && r.error) || 'failed'));
     } catch (e) { dbg('wizard action', e); setNote(String((e && e.message) || e)); }
   };
+  const uninstallGpu = async () => {
+    // Two-step INLINE confirm (the owner dislikes dialogs): the first click
+    // arms the button, the second within 3 s really takes the pack off.
+    // The backend reverse-uninstalls along the LEDGER's recorded install
+    // path — the DLL root on a user's machine is wherever the installer
+    // wrote it back then, not what we could guess today.
+    if (uninst === 0) {
+      setUninst(1);
+      setTimeout(() => setUninst((u) => (u === 1 ? 0 : u)), 3000);
+      return;
+    }
+    setUninst(0); setNote('');
+    try {
+      const r = await ctx.rest('/wizard/gpu', { method: 'DELETE', timeoutMs: 30000 });
+      if (r && r.ok) { setNote(t('yache.wiz_uninstalled')); refreshLib(); loadGpu(); }
+      else {
+        const WHY = { busy: t('yache.wiz_uninstall_busy'),
+                      in_use: t('yache.wiz_uninstall_in_use'),
+                      not_pack: t('yache.wiz_uninstall_not_pack'),
+                      io: t('yache.wiz_uninstall_io') };
+        setNote(WHY[r && r.reason] || String((r && r.error) || 'failed'));
+      }
+    } catch (e) { dbg('wizard gpu uninstall', e); setNote(String((e && e.message) || e)); }
+  };
   useEffect(() => {
     // cancel button feedback: poll until the ledger really moved, then
     // restore the button greyed for one beat (owner's 11-10 convention).
@@ -1817,7 +1942,7 @@ function DownloadSection({ ctx, t, lib, refreshLib }) {
       tries += 1;
       let r = null;
       try { r = await ctx.rest('/wizard/status'); } catch (e) { dbg('wizard/cancel poll', e); }
-      if ((r && r.state !== 'running') || tries > 12) {
+      if ((r && !DL_ACTIVE(r.state)) || tries > 30) {
         clearInterval(iv); setCanceling(false);
         if (r) setDlp(r);
         loadGpu();
@@ -1825,7 +1950,8 @@ function DownloadSection({ ctx, t, lib, refreshLib }) {
     }, 1000);
     return () => clearInterval(iv);
   }, [canceling]);
-  const shown = dlp && (dlp.state === 'running' || dlp.state === 'error'
+  const shown = dlp && (dlp.state === 'running' || dlp.state === 'extracting'
+    || dlp.state === 'probing' || dlp.state === 'error'
     || dlp.state === 'cancelled' || dlp.state === 'interrupted'
     || dlp.state === 'installed_unverified') ? dlp : null;
   const canStart = !!wdir.trim() && !!qSel && !running;
@@ -1885,21 +2011,25 @@ function DownloadSection({ ctx, t, lib, refreshLib }) {
           } catch (e) { dbg('wizard/browse', e); }
         }, children: t('yache.wiz_browse') }),
     ] }),
-    shown && shown.state === 'running' ? jsxs('div', { className: 'space-y-1', children: [
+    shown && DL_ACTIVE(shown.state) ? jsxs('div', { className: 'space-y-1', children: [
       jsx('div', { className: 'h-2 w-full overflow-hidden rounded-full bg-muted',
         children: jsx('div', {
           className: 'h-full rounded-full bg-emerald-500 transition-all duration-700',
           style: { width: `${Math.max(1.5, Number(shown.pct) || 0)}%` } }) }),
-      jsx('p', { className: 'text-[10px] tabular-nums text-muted-foreground',
+      shown.state !== 'extracting' ? jsx('p', { className: 'text-[10px] tabular-nums text-muted-foreground',
         children: t('yache.wiz_prog', (Number(shown.pct) || 0).toFixed(1),
-          (Number(shown.mbps) || 0).toFixed(1), eta(shown.eta_s)) }),
+          (Number(shown.mbps) || 0).toFixed(1), eta(shown.eta_s)) }) : null,
       jsx('p', { className: 'text-[10px] text-muted-foreground',
         children: String(shown.step_label || '') }),
-      jsx(Button, { className: 'w-full', size: 'xs', variant: 'outline',
+      // DLL deploy is quiet work with nothing to cancel — the backend
+      // ignores a cancel at this beat, so don't offer a button that lies.
+      shown.state === 'extracting' ? jsx('p', { className: 'text-[11px] font-medium text-amber-400',
+        children: t('yache.wiz_extracting') }) : null,
+      shown.state === 'running' ? jsx(Button, { className: 'w-full', size: 'xs', variant: 'outline',
         disabled: canceling, onClick: cancel,
-        children: canceling ? t('yache.wiz_cancelling') : t('yache.wiz_cancel') }),
+        children: canceling ? t('yache.wiz_cancelling') : t('yache.wiz_cancel') }) : null,
     ] }) : null,
-    shown && shown.state !== 'running' ? jsxs('div', { className: 'space-y-1', children: [
+    shown && !DL_ACTIVE(shown.state) ? jsxs('div', { className: 'space-y-1', children: [
       jsx('p', { className: `text-[11px] ${shown.state === 'error' ? 'text-rose-500' : 'text-muted-foreground'}`,
         children: `${shown.state === 'error' ? String(shown.error || '') : String(shown.state)}` }),
       shown.state === 'error' || shown.state === 'interrupted' || shown.state === 'cancelled'
@@ -1915,6 +2045,17 @@ function DownloadSection({ ctx, t, lib, refreshLib }) {
         children: t('yache.wiz_gpu_title') }),
       jsx('p', { className: `text-[11px] leading-4 ${gpu && gpu.installed ? 'text-emerald-500' : 'text-muted-foreground'}`,
         children: !gpu ? '' : gpu.installed ? t('yache.wiz_gpu_on') : t('yache.wiz_gpu_off') }),
+      // Installed? offer the way back out — the loop closes both ways.
+      // Armed state reads amber (owner's alert color), not a dialog.
+      gpu && gpu.installed
+        ? jsx(Button, { className: 'w-full', size: 'xs', variant: 'outline',
+            disabled: running,
+            style: uninst === 1
+              ? { pointerEvents: 'auto', borderColor: '#fbbf24', color: '#fbbf24' }
+              : { pointerEvents: 'auto' },
+            onClick: uninstallGpu,
+            children: t(uninst === 1 ? 'yache.wiz_uninstall_confirm' : 'yache.wiz_uninstall') })
+        : null,
       !gpu || gpu.installed ? null
         : jsx(Button, { className: 'w-full', size: 'xs',
             variant: gpu.gate_ok ? 'default' : 'outline',
@@ -2274,7 +2415,7 @@ function CloneBody({ ctx, t, lib, refreshLib }) {
       ] }) }) : null,
     !dirDirty && !present.length && lib && !lib.scan_error
       ? jsx('p', { className: 'text-[11px] text-amber-500',
-        children: t('yache.models_missing', 'base, customvoice, voicedesign') })
+        children: t('yache.mdl_fresh') })
       : null,
     dirDirty ? jsx('p', { className: 'text-[11px] text-amber-500',
       children: t('yache.mdl_dirty') }) : null,
@@ -2546,6 +2687,25 @@ function SettingsPage({ ctx }) {
                       } catch { /* best-effort toast */ }
                     },
                     children: checking ? t('yache.refreshing') : t('yache.refresh') }),
+    // Log button — the support trail lives in the plugin's own log (host
+    // logs only show the one-line summary). Reveals it in Explorer with
+    // the file selected; silent by design, the window appearing IS the
+    // confirmation.
+    jsx(Button, { variant: 'outline', size: 'sm',
+      style: { pointerEvents: 'auto' },
+      onClick: async () => {
+        try {
+          const r = await ctx.rest('/debug/open_log', { method: 'POST' });
+          if (r && r.ok === false) {
+            try {
+              host.notify({ kind: 'warning',
+                message: t('yache.open_log_fail')
+                  + String(r.error || 'failed') });
+            } catch { /* best-effort toast */ }
+          }
+        } catch { /* opener trouble must never bite the page */ }
+      },
+      children: t('yache.open_log') }),
     ] }),
     jsx('div', { children: jsxs('h2', { className: 'text-lg font-semibold', children: [
       t('yache.page_title'),

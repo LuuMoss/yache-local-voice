@@ -102,7 +102,8 @@ def ui_debug(payload: Optional[Dict[str, Any]] = None) -> Dict[str, bool]:
     and never raises: logging is diagnostics, not function."""
     try:
         msg = (payload or {}).get("msg")
-        _log.info("[panel] %s", "" if msg is None else str(msg)[:4000])
+        _log.info(_i18n.ui("[面板] %s", "[panel] %s"),
+            "" if msg is None else str(msg)[:4000])
     except Exception:  # noqa: BLE001
         pass
     return {"ok": True}
@@ -816,6 +817,21 @@ def _save_wake_phrase(phrase: str, model_dir: Optional[str]) -> None:
             sub.pop("model_dir", None)
         wake["sherpa"] = sub
     cfg["wake_word"] = wake
+    # STT pointer bridge (wake-gate fix, 2026-11-20): the official wake gate
+    # (tui_gateway wake.start) reads stt.provider for STT readiness, and a
+    # fresh install ships no stt section at all -- so its auto-detect lands on
+    # "none" and the wake switch is refused with "needs speech-to-text
+    # configured" even though this plugin owns the working engine. Saving a
+    # wake phrase IS the moment the user asks for wake, so adopt our
+    # registered local-stt provider here -- but only when nothing is
+    # configured yet; an explicit user choice (groq/openai/local/...) is
+    # never touched. Names the host does not know pass straight through to
+    # the plugin provider dispatch (tools.transcription_tools._get_provider).
+    stt = cfg.get("stt")
+    stt = dict(stt) if isinstance(stt, dict) else {}
+    if not str(stt.get("provider", "")).strip():
+        stt["provider"] = "local-stt"
+        cfg["stt"] = stt
     save_config(cfg)
 
 
@@ -854,7 +870,22 @@ def _try_build(wake: Dict[str, Any], phrase: str, model_dir: str) -> tuple:
 @router.get("/wake-phrase")
 def wake_phrase_get() -> Dict[str, Any]:
     """Current wake phrase, its script routing and the armed state."""
-    return {"ok": True, **_wake_phrase_state()}
+    out = {"ok": True, **_wake_phrase_state()}
+    # Fresh-install awareness for the panel: which KWS model the saved
+    # phrase needs and whether the machine already has it — the panel
+    # offers a one-click fetch when it doesn't (owner, 2026-11-20).
+    try:
+        if _dl is None:
+            raise RuntimeError("download module unavailable")
+        ph = str(out.get("phrase") or "")
+        norm = "".join(ch for ch in ph.lower() if ch.isalnum())
+        if norm and norm != "heyhermes":
+            want = "en" if _phrase_language(ph) == "en" else "zh"
+            out["model_lang"] = want
+            out["model_ready"] = bool(_dl.wake_model_ready(want))
+    except Exception:
+        pass
+    return out
 
 
 @router.post("/wake-phrase")
@@ -882,9 +913,16 @@ def wake_phrase_set(body: _WakePhraseIn) -> Dict[str, Any]:
             _save_wake_phrase(phrase, None)
         except Exception as exc:
             return {"ok": False, "detail": f"config write failed: {exc}"}
+        # Fresh-install bridge (owner's matrix, 2026-11-20): choosing a wake
+        # word IS the intent to be woken by it. "hey hermes" keeps the
+        # bundled openwakeword (its one model already says exactly that,
+        # host-supplied, we never touch it); any other phrase gets pointed
+        # at the sherpa engine plus the KWS model for its script — English
+        # phrase -> gigaspeech, anything else -> wenetspeech — downloading
+        # the model on the spot when this machine has none.
         return {"ok": True, "verified": False, "attempts": [],
                 "model_changed": False, "apply": apply_hint,
-                **_wake_phrase_state()}
+                **_wake_phrase_state(), **_wake_model_bridge(phrase)}
 
     # Model candidates, in order: the current model when its script already
     # matches the phrase, then matching-script models from the official
@@ -927,6 +965,76 @@ def wake_phrase_set(body: _WakePhraseIn) -> Dict[str, Any]:
     return {"ok": True, "verified": True, "attempts": attempts,
             "model_changed": model_changed, "apply": apply_hint,
             **_wake_phrase_state()}
+
+
+def _wake_model_bridge(phrase: str) -> Dict[str, Any]:
+    """Save-time wake-model bridge (owner's matrix, 2026-11-20) for engines
+    that carry no model machinery of their own:
+
+      * ``hey hermes`` -> no-op. openwakeword ships with the host and its
+        single bundled model is exactly that phrase; we never judge it.
+      * pure-English phrase -> point at sherpa + ensure the gigaspeech
+        (English BPE) model. The host can auto-fetch this one itself but
+        GitHub-direct only, no mirror, no resume — we own the download so
+        it also works behind CN networks, and pin the official SHA256.
+      * anything else -> sherpa + the wenetspeech (pinyin) model, which
+        the host NEVER fetches on its own: without this bridge a Chinese
+        wake word simply stays silent on a fresh install.
+
+    A model that is already on disk (ours or an equivalent placed by any
+    other path) is pointed at, never re-downloaded. Returns panel fields
+    ``{model: ready|downloading|error, lang}``; ``{}`` for the no-op case.
+    """
+    if _dl is None:  # top-level flat import failed; panel shows detail
+        return {"model": "error", "lang": _phrase_language(phrase),
+                "detail": "download module unavailable"}
+    norm = "".join(ch for ch in phrase.lower() if ch.isalnum())
+    if norm == "heyhermes":
+        return {}
+    want = "en" if _phrase_language(phrase) == "en" else "zh"
+    if _dl.wake_model_ready(want):
+        _dl._wake_write_config(want,
+                               _dl.wake_model_root() / _dl.wake_model_dirname(want))
+        return {"model": "ready", "lang": want}
+    r = _dl.start_wake_model_download(want, phrase)
+    if r.get("ok") or r.get("busy"):
+        return {"model": "downloading", "lang": want}
+    return {"model": "error", "lang": want,
+            "detail": str(r.get("detail") or "download could not start")}
+
+
+@router.get("/wake-model/status")
+def wake_model_status_get() -> Dict[str, Any]:
+    """Progress of the save-bridge wake-model job; idle for any other
+    download kind, so the wake panel never paints the CUDA/model wizard."""
+    if _dl is None:
+        return {"ok": False, "state": "idle", "detail": "download module unavailable"}
+    return {"ok": True, **_dl.wake_model_status()}
+
+
+@router.post("/wake-model/retry")
+def wake_model_retry() -> Dict[str, Any]:
+    """Retry a failed wake-model fetch: resume in place when a wake job is
+    already holding progress (.part kept), else rebuild the plan from the
+    currently saved phrase."""
+    if _dl is None:
+        return {"ok": False, "model": "error", "detail": "download module unavailable"}
+    st = _dl.load_state()
+    if (st and str(st.get("kind") or "") == "wake"
+            and str(st.get("state") or "") in
+                ("error", "interrupted", "cancelled")):
+        r = _dl.resume_download()
+        if r.get("ok"):
+            return {"ok": True, "model": "downloading"}
+        return {"ok": False, "model": "failed",
+                "detail": str(r.get("detail") or "resume refused")}
+    phrase = str(_wake_phrase_state().get("phrase") or "")
+    if not phrase:
+        return {"ok": False, "detail": "no saved wake phrase"}
+    bridge = _wake_model_bridge(phrase)
+    if not bridge:
+        return {"ok": False, "detail": "this wake word needs no model fetch"}
+    return {"ok": bridge.get("model") != "error", **bridge}
 
 
 # ── Voice library: the clone -> TTS unlock flow lives here ─────────
@@ -1026,6 +1134,12 @@ def _clone_ledger_drop(name: str) -> None:
 
 def _lib_view() -> Dict[str, Any]:
     base = _p.tts_base_dir()
+    # fresh machine: the user never picked a dir AND the default location was
+    # never provisioned. The box must then read EMPTY with no red error —
+    # prefilling the fallback default path misled users into thinking the
+    # model has to live on C:.
+    custom = bool(str(_p.load_data().get("tts_base_dir", "")).strip())
+    fresh = not custom and not Path(base).exists()
     # A missing/moved model dir must NOT take the whole settings page down:
     # degrade to an empty scan and surface the human-readable reason; the
     # panel shows the red note and the model-dir row lets the user point at
@@ -1037,6 +1151,8 @@ def _lib_view() -> Dict[str, Any]:
         scan, scan_error = {}, str(exc)
     except Exception as exc:  # noqa: BLE001
         scan, scan_error = {}, "%s: %s" % (type(exc).__name__, exc)
+    if fresh:
+        scan_error = None
     by_variant = {v.get("variant"): v for v in scan.get("variants") or []}
     free = _w.cuda_free_mib()
     cuda = bool(_w._has_nvidia())
@@ -1097,8 +1213,8 @@ def _lib_view() -> Dict[str, Any]:
                       "device": str(saved_tts.get("device") or "auto")},
         "voices_dir": str(_p.voices_dir()),
         "active_dir": {
-            "path": str(base),
-            "custom": bool(str(data.get("tts_base_dir", "")).strip()),
+            "path": "" if fresh else str(base),
+            "custom": custom,
         },
     }
 
@@ -1142,16 +1258,16 @@ def _preview_spec_enrich(spec: Dict[str, Any]) -> Dict[str, Any]:
 
 def _run_preview(spec: Dict[str, Any], text: str,
                  timeout_s: int = 180) -> Dict[str, Any]:
-    """Spawn one worker --preview run. The env must be stripped of
-    PYTHONPATH/PYTHONHOME or the host's own site-packages hijacks the
-    engine venv's numpy (cp314 vs cp312 .pyd mismatch)."""
+    """Spawn one worker --preview run. The env is built by paths.worker_env:
+    PYTHONPATH/PYTHONHOME are stripped only when the child runs on an engine
+    venv (cp314 host vs cp312 venv .pyd mismatch); in the release layout the
+    child is the host python itself and keeps its harness numpy path."""
     py = _p.engine_python()
     if not py.is_file():
         raise HTTPException(status_code=503,
                             detail=_i18n.ui(f"引擎 Python 缺失: {py}", f"Engine Python not found: {py}"))
     spec = _preview_spec_enrich(spec)
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("PYTHONPATH", "PYTHONHOME")}
+    env = _p.worker_env(py)
     env["HERMES_VOICES_DIR"] = str(_p.voices_dir())
     env["VA_VOICE_JSON"] = json.dumps(spec, ensure_ascii=False)
     workdir = str(_p.worker_script().parent)
@@ -1329,11 +1445,12 @@ def voice_design_export(payload: DesignExportIn) -> dict[str, Any]:
         with open(dest, "wb") as fh:
             fh.write(data)
     except OSError as exc:
-        _log.warning("design export failed: %s", exc)
+        _log.warning(_i18n.ui("试听样本导出失败: %s", "design export failed: %s"), exc)
         return {"ok": False, "error": _i18n.ui(
             f"写入文件失败：{exc}", f"Writing the file failed: {exc}")}
-    _log.info("[panel] design voice clip exported: %s (%d bytes)",
-                dest, len(data))
+    _log.info(_i18n.ui("[面板] 试听语音样本已导出: %s（%d 字节）",
+                     "[panel] design voice clip exported: %s (%d bytes)"),
+            dest, len(data))
     return {"ok": True, "path": dest}
 
 
@@ -1675,6 +1792,18 @@ def wizard_cancel():
     return r
 
 
+@router.delete("/wizard/gpu")
+def wizard_gpu_uninstall():
+    """Take the CUDA accelerator back off — reverse-uninstall along the
+    install path the ledger recorded (the pack may live in HERMES_HOME or
+    in the plugin-dir fallback, depending on the user's machine). See
+    download.uninstall_gpu for the warrant story."""
+    d = _dl_or_none()
+    if d is None:
+        return {"ok": False, "error": _i18n.ui("下载模块未装载", "download module unavailable")}
+    return d.uninstall_gpu()
+
+
 @router.delete("/voice/clone/{name}")
 def voice_clone_delete(name: str):
     """Remove a clone entry from the voices registry. The reference wav
@@ -1930,7 +2059,8 @@ def stt_save(payload: _SttIn) -> Dict[str, Any]:
         block["device"] = device
         _p.save_data(data)
     except Exception as exc:  # noqa: BLE001
-        _log.warning("[panel] stt device persist failed: %s", exc)
+        _log.warning(_i18n.ui("[面板] 转录设备记忆失败: %s",
+                         "[panel] stt device persist failed: %s"), exc)
     return {"ok": True, "model": model, "language": language,
             "device": device, "engine": str(out.get("version") or ""),
             "device_used": str(out.get("device") or ""),
@@ -1995,6 +2125,22 @@ def stt_download(payload: _SttIn) -> Dict[str, Any]:
                 break
             except Exception as exc:  # noqa: BLE001  (raw error travels)
                 err = "%s: %s" % (type(exc).__name__, exc)
+        if err == "":
+            # The download+verify just landed — inventory the fresh cache
+            # so the Delete button can later reverse-remove EXACTLY this
+            # download (same closed-loop contract as the CUDA accelerator
+            # pack). Best effort: a snapshot we failed to write only means
+            # Delete falls back to whole-dir removal, the legacy route.
+            try:
+                _fresh = _hub_of() / ("models--Systran--faster-whisper-"
+                                      + model)
+                if _fresh.is_dir():
+                    _dl._write_pack_manifest(_fresh, kind="stt-model",
+                                             pack=model)
+                    _log.info(_i18n.ui("转录: %s 模型快照已写入", "stt: snapshot written for %s cache"), model)
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(_i18n.ui("转录: %s 快照写入失败: %s",
+                         "stt: snapshot for %s failed: %s"), model, exc)
         with _DL_LOCK:
             _DL["state"] = "error" if err else "done"
             _DL["error"] = err
@@ -2047,6 +2193,21 @@ def stt_delete(payload: _SttIn) -> Dict[str, Any]:
     if not rdir.is_dir():
         # Cache scan says yes, disk says no: already gone — be idempotent.
         return {"ok": True, "model": model, "freed_gb": 0.0}
+    # Ownership before anything gets removed: the folder must sit DIRECTLY
+    # under our hub root (realpath, so junctions/symlinks cannot smuggle a
+    # foreign tree in) and be an HF model folder. A cache relocated via
+    # HF_HOME between download and delete, or a weird name, simply refuses.
+    try:
+        same_root = (Path(os.path.realpath(rdir.parent))
+                     == Path(os.path.realpath(_hub_of())))
+    except OSError:
+        same_root = False
+    if not same_root or not rdir.name.startswith("models--"):
+        return {"ok": False,
+                "error": _i18n.ui(
+                    "缓存目录位置与预期不符，为安全起见未做任何删除: %s",
+                    "The cache folder is not where we installed it — "
+                    "nothing was removed, for safety: %s") % str(rdir)}
     freed = 0
     try:
         for p in rdir.rglob("*"):
@@ -2054,9 +2215,28 @@ def stt_delete(payload: _SttIn) -> Dict[str, Any]:
                 freed += p.stat().st_size
     except OSError:
         pass
+    # Reverse removal, manifest first: when this download was installed by
+    # a snapshot-aware plugin, Delete walks the snapshot and removes only
+    # files that still match their recorded hash — anything the user added
+    # or altered afterwards survives, and the folder itself is rmdir'd only
+    # when truly empty. Caches from older plugin builds carry no snapshot
+    # and keep the legacy whole-dir removal (the folder is HF-owned space,
+    # never a user folder, and the ownership gate above already vouches
+    # for it). rmtree/unlink can race a verify worker that just finished
+    # (its process may linger a beat holding model.bin): retry a few beats.
     err = ""
+    kept: list = []
+    man = _dl._read_pack_manifest(rdir, kind="stt-model") if _dl else None
     for _ in range(3):
         try:
+            if man is not None:
+                _removed, kept, perr = _dl.uninstall_by_manifest(rdir, man)
+                if perr == "in_use":
+                    err = "in_use"
+                    time.sleep(0.6)
+                    continue
+                err = ""
+                break
             shutil.rmtree(rdir)
             err = ""
             break
@@ -2067,8 +2247,17 @@ def stt_delete(payload: _SttIn) -> Dict[str, Any]:
         return {"ok": False, "error": _i18n.ui("删除失败（模型可能正被占用）: %s",
                                               "delete failed (the model may be in use): %s")
                                       % err}
+    now = 0
+    if rdir.is_dir():  # snapshot left something behind — count the residue
+        try:
+            for p in rdir.rglob("*"):
+                if p.is_file():
+                    now += p.stat().st_size
+        except OSError:
+            pass
     return {"ok": True, "model": model,
-            "freed_gb": round(freed / 1_000_000_000.0, 2)}
+            "freed_gb": round(max(freed - now, 0) / 1_000_000_000.0, 2),
+            "kept": [k for k in kept if not str(k).startswith("<")]}
 
 
 @router.get("/stt/download/status")
@@ -2400,6 +2589,37 @@ def _env_worker(job: Dict[str, Any]) -> None:
             _stt._probe_cache.pop(py, None)
         except Exception:  # noqa: BLE001
             pass
+        # Birth certificate: a snapshot of what we just built, written
+        # INSIDE the folder (it goes away with the folder). The venv is a
+        # living tree — running a transcription adds __pycache__ files on
+        # its own — so its uninstaller does not reverse individual files;
+        # it identifies the folder through this certificate and removes
+        # the whole thing. Anchors: the interpreter and pyvenv.cfg.
+        try:
+            import hashlib as _hl
+            def _anch(fp: Path) -> str:
+                try:
+                    h = _hl.sha256()
+                    with open(fp, "rb") as fh:
+                        for chunk in iter(lambda: fh.read(1 << 20), b""):
+                            h.update(chunk)
+                    return h.hexdigest()
+                except OSError:
+                    return ""
+            _cfg = Path(env_dir) / "pyvenv.cfg"
+            manifest = {"kind": "stt-env", "pack": "faster-whisper",
+                        "env_python": py,
+                        "anchors": {"Scripts/python.exe": _anch(Path(py)),
+                                    "pyvenv.cfg": _anch(_cfg)},
+                        "whisper_version": detail,
+                        "installed_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+            Path(env_dir, ".yache-pack-manifest.json").write_text(
+                json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+            _env_log(job, _i18n.ui("已为环境写入文件快照（卸载可据此反向移除）",
+                                   "install snapshot written (uninstall can "
+                                   "reverse exactly this environment)"))
+        except OSError as exc:
+            _log.warning(_i18n.ui("转录环境快照写入失败: %s", "stt env snapshot failed: %s"), exc)
         with _ENV_LOCK:
             job.update(state="done", error="", replaced=replaced,
                        whisper_version=detail, finished_at=time.time())
@@ -2496,6 +2716,168 @@ def stt_env_install_status() -> Dict[str, Any]:
     return job
 
 
+@router.post("/debug/open_log")
+def open_plugin_log() -> Dict[str, Any]:
+    """Reveal the plugin's own log in the system file manager. The support
+    trail lives here (the host log only carries the one-line summary), and
+    owners filing bug reports need it without hunting folders by hand.
+    Windows: Explorer with the file pre-selected; the log DIRECTORY opens
+    when nothing has been written yet. Fire-and-forget — GUI openers are
+    flaky by nature (explorer.exe even exits nonzero on success sometimes),
+    so nothing here may bite the caller."""
+    import subprocess as _sp
+    import sys as _sys
+    log = _p.plugin_root() / "logs" / "yache-plugin.log"
+    target = str(log if log.exists() else log.parent)
+    # second volume: the engine subprocess stderr dump (post-mortem trail
+    # for synthesis crashes — the child died before the host could log).
+    child = _p.hermes_home() / "cache" / "scratch" / "yache-voice-child.log"
+    try:
+        if _sys.platform == "win32":
+            if log.exists():
+                _sp.Popen(["explorer.exe", "/select,", str(log)])
+            else:
+                _sp.Popen(["explorer.exe", target])
+            if child.exists():
+                _sp.Popen(["explorer.exe", "/select,", str(child)])
+        elif _sys.platform == "darwin":
+            _sp.Popen(["open", target])
+        else:
+            _sp.Popen(["xdg-open", target])
+        return {"ok": True, "path": target}
+    except Exception as exc:            # never bite the panel
+        return {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:100]}",
+                "path": target}
+
+
+@router.post("/stt/env/uninstall")
+def stt_env_uninstall() -> Dict[str, Any]:
+    """Remove the plugin-owned ASR environment — the loop's other half.
+
+    The environment is a living tree (running a transcription sprinkles
+    __pycache__ on its own), so its uninstaller does not reverse single
+    files the way the CUDA pack does: it IDENTIFIES the folder first and
+    only then takes the whole thing down.  Identification = one of:
+      * the birth-certificate snapshot the installer wrote inside the
+        folder (.yache-pack-manifest.json, kind "stt-env"),
+      * a real pyvenv.cfg / Scripts python.exe (venvs from older builds),
+      * nothing at all inside — half-finished wreckage of our own install.
+    Anything ELSE sitting at that path (the user put a folder there by
+    hand, no venv marks) is refused outright.  The path itself is the
+    plugin's fixed stt/.venv layout, checked name-by-name, so a renamed
+    or relocated folder is simply reported as absent.
+    Only the environment goes: the model cache under the HF hub, the
+    chosen model, and every user file elsewhere are untouched; a pin
+    pointing into this environment is cleared so the ladder falls back
+    to a system interpreter instead of dangling.
+    """
+    with _ENV_LOCK:
+        if _ENV.get("state") == "running":
+            return {"ok": False,
+                    "error": _i18n.ui("环境正在安装中，请先等它装完",
+                                      "An install is running — wait for it "
+                                      "to finish before uninstalling")}
+    env_dir = _p.stt_env_dir()
+    py = str(_p.stt_env_python())
+
+    def _clear_pin() -> bool:
+        data = _p.load_data()
+        if str(data.get("stt_python", "")).strip().lower() != str(py).lower():
+            return False
+        data.pop("stt_python", None)
+        _p.save_data(data)
+        try:
+            from yache_engine import stt as _stt
+            _stt._probe_cache.pop(py, None)
+            _stt._probe_cache.pop(str(Path(py)), None)
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
+    if not env_dir.is_dir():
+        # Nothing to remove — but a pin may still point at a venv that
+        # went missing behind our back; self-heal it and call it done.
+        return {"ok": True, "removed": None, "pin_removed": _clear_pin()}
+    # Ownership: the folder must be EXACTLY the plugin's stt/.venv layout
+    # (realpath, so a junction cannot smuggle a foreign tree under us).
+    try:
+        real = Path(os.path.realpath(env_dir))
+        ours = (real.name == Path(os.path.realpath(str(env_dir))).name
+                and env_dir.name == Path(str(_p.stt_env_dir())).name
+                and env_dir.parent.name == Path(str(_p.stt_env_dir())).parent.name
+                and Path(os.path.realpath(env_dir.parent))
+                == Path(os.path.realpath(str(env_dir))).parent)
+    except OSError:
+        ours = False
+    if not ours:
+        return {"ok": False,
+                "error": _i18n.ui("环境目录布局与预期不符，未做任何删除: %s",
+                                  "The environment folder does not match our "
+                                  "layout — nothing was removed: %s") % str(env_dir)}
+    # Identity: snapshot certificate / real venv marks / empty wreckage.
+    # A NON-empty folder with no venv marks at all = someone else's files
+    # parked at our path: refuse, never rmtree a stranger.
+    mode = "legacy"
+    try:
+        man = json.loads((env_dir / ".yache-pack-manifest.json")
+                         .read_text(encoding="utf-8"))
+        mode = "manifest" if str(man.get("kind")) == "stt-env" else "legacy"
+    except (OSError, ValueError):
+        pass
+    has_cfg = (env_dir / "pyvenv.cfg").is_file()
+    has_exe = Path(py).is_file()
+    if not has_cfg and not has_exe and mode == "legacy":
+        try:
+            marks = any(env_dir.rglob("*"))
+        except OSError:
+            marks = True
+        if marks:
+            return {"ok": False,
+                    "error": _i18n.ui(
+                        "这个目录里没有 venv 特征（pyvenv.cfg/解释器），不像本插件装的环境，为安全起见未删除: %s",
+                        "This folder has no venv marks (no pyvenv.cfg, no "
+                        "interpreter) so it does not look like our install "
+                        "— nothing was removed: %s") % str(env_dir)}
+        mode = "wreckage"
+    # Fast exclusion probe: an interpreter still RUNNING cannot be opened
+    # for write on Windows (sharing violation). A transcription in flight
+    # is the realistic case; refuse up front instead of grinding through
+    # the rmtree retries.
+    if has_exe:
+        try:
+            with open(py, "r+b"):
+                pass
+        except PermissionError:
+            return {"ok": False, "error": _i18n.ui(
+                "转录正在使用这个环境（python.exe 运行中），请等它跑完再卸载",
+                "A transcription is using this environment (python.exe is "
+                "running) — wait for it to finish, then uninstall")}
+        except OSError:
+            pass  # other open problems: let the tolerant rmtree try anyway
+    freed = 0
+    try:
+        for f in env_dir.rglob("*"):
+            if f.is_file():
+                freed += f.stat().st_size
+    except OSError:
+        pass
+    try:
+        _env_rmtree(env_dir)   # retry-tolerant, deletes even delete-pending trees
+    except OSError as exc:
+        return {"ok": False,
+                "error": _i18n.ui("删除失败（环境可能正被占用）: %s",
+                                  "removal failed (the environment may be "
+                                  "in use): %s") % exc}
+    if env_dir.exists():  # pending-delete ghosts: Windows will free them
+        try:                          # shortly after — report the intent,
+            _env_rmtree(env_dir)      # not a failure, and count nothing freed
+        except OSError:
+            pass
+    return {"ok": True, "removed": str(env_dir), "mode": mode,
+            "pin_removed": _clear_pin(),
+            "freed_gb": round(freed / 1_000_000_000.0, 2)}
+
+
 # ---------------------------------------------------------------------------
 # Plugin-owned error trail: wrap every route endpoint so any 500 leaves a full
 # traceback in <plugin>/logs/yache-plugin.log (host logs only show the one
@@ -2513,7 +2895,7 @@ def _wrap_endpoints() -> None:
             except HTTPException:
                 raise
             except Exception as exc:
-                _log.exception("route %s failed", fn.__name__)
+                _log.exception(_i18n.ui("路由 %s 执行失败", "route %s failed"), fn.__name__)
                 raise HTTPException(
                     status_code=500,
                     detail=f"{fn.__name__}: {type(exc).__name__}: {exc} "
@@ -2528,7 +2910,7 @@ def _wrap_endpoints() -> None:
             except HTTPException:
                 raise
             except Exception as exc:
-                _log.exception("route %s failed", fn.__name__)
+                _log.exception(_i18n.ui("路由 %s 执行失败", "route %s failed"), fn.__name__)
                 raise HTTPException(
                     status_code=500,
                     detail=f"{fn.__name__}: {type(exc).__name__}: {exc} "
@@ -2546,6 +2928,9 @@ def _wrap_endpoints() -> None:
 
 try:
     _wrap_endpoints()
-    _log.info("dashboard api loaded: %d routes wrapped", len(router.routes))
+    _log.info(_i18n.ui("面板 API 已装载: 包裹路由 %d 条",
+                     "dashboard api loaded: %d routes wrapped"),
+            len(router.routes))
 except Exception:
-    _log.exception("dashboard api: endpoint wrapping failed")
+    _log.exception(_i18n.ui("面板 API: 端点包裹失败",
+                           "dashboard api: endpoint wrapping failed"))

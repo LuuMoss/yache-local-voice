@@ -36,6 +36,43 @@ except ImportError:  # package-context fallback (hermes_plugins.<slug>)
     from .yache_engine import state as _state
 
 
+def _heal_tts_pointer() -> None:
+    """Fresh-install self-heal (owner, 2026-11-20).
+
+    The host's read-aloud path routes through ``tts.provider``; on a fresh
+    install NOTHING sets that key, so the TTS this plugin registers stays
+    "ready but unused" and read-aloud silently falls back to the built-in
+    edge engine — the panel then shows 已就绪·未生效 and only the tail
+    punctuation gets spoken. Unlike the wake-word bridge there is no
+    "save" moment to carry this, so it heals once at plugin registration
+    (gateway start): write the pointer ONLY when the key is ABSENT. An
+    explicit choice the user made (edge, groq, any other provider) is
+    never overwritten. Idempotent: after the first write every later
+    start passes straight through.
+    """
+    try:
+        from hermes_cli.config import load_config, save_config
+        cfg = load_config() or {}
+        tts = cfg.get("tts")
+        if isinstance(tts, dict) and "provider" in tts:
+            return
+        if not isinstance(tts, dict):
+            tts = {}
+        tts["provider"] = "qwen3-tts"
+        cfg["tts"] = tts
+        save_config(cfg)
+        try:
+            from yache_engine import logbox as _lx
+            _lx.get_logger().info(
+                "tts.provider was unset -> pointed at qwen3-tts (read-aloud route)")
+        except Exception:
+            pass
+    except Exception:
+        # never fail registration over a config hiccup; the panel's doctor
+        # lamp still tells the user the route is not pointing here
+        pass
+
+
 def _register_impl(ctx) -> None:
     """Register every provider, tool and command hosted by this plugin.
 
@@ -46,6 +83,7 @@ def _register_impl(ctx) -> None:
     """
     _tts.register(ctx)   # provider "qwen3-tts" + doctor tool + commands
     _stt.register(ctx)   # provider "local-stt" + status tool + /stt
+    _heal_tts_pointer()  # fresh-install route pointer (key absent -> ours)
 
     # Visible to the web half (dashboard/api.py) via the shared
     # engine.state module — feeds /health and the doctor "plugin" lamp.

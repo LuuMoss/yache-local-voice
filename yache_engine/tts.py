@@ -214,12 +214,10 @@ def _ensure_server(env: dict | None = None, voice_key: str | None = None) -> Non
         if _server_alive() and _SERVER_VOICE == voice_key:
             return
         _stop_server_locked()
-        e = dict(os.environ)
-        # The gateway leaks its own PYTHONPATH (harness site-packages) into
-        # children; it hijacks the engine venv's numpy (cp314 host vs cp312
-        # engine .pyd). Strip it — the engine venv resolves on its own.
-        e.pop("PYTHONPATH", None)
-        e.pop("PYTHONHOME", None)
+        # Strip PYTHONPATH/PYTHONHOME only for a venv child (paths.worker_env
+        # owns the rule): in the release layout the worker IS the host python
+        # and its numpy arrives through that very PYTHONPATH.
+        e = _p.worker_env(_ENGINE_PYTHON)
         e.setdefault("PYTHONUTF8", "1")
         e.setdefault("HERMES_VOICES_DIR", str(_VOICES))
         if env:
