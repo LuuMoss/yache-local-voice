@@ -111,16 +111,18 @@ jobs:
   # conda either), so the toolkit is installed with the official
   # mamba-org/setup-micromamba action from NVIDIA's `nvidia` conda channel
   # (NVIDIA-published packages).  The runners' MSVC (VS 18 / cl 14.5x)
-  # is newer than what CUDA 12.8 clamps as supported, hence
+  # is newer than what CUDA 12.4 clamps as supported, hence
   # -allow-unsupported-compiler; no GPU exists on the runner, so fatbin
-  # targets are pinned explicitly (Turing..Blackwell + PTX, covering the
-  # 3090 sm_86 this pack is primarily validated against).
+  # targets are pinned explicitly.  CUDA 12.4 matches the NVIDIA runtime
+  # DLLs bundled in the pack (and the official llama.cpp cuda-12.4 line,
+  # which still supports Pascal sm_61).  CMake 4.4 dropped the legacy
+  # "90+PTX" syntax, so the PTX copy uses the -virtual suffix.
   # ------------------------------------------------------------------
   build-cuda-pack:
     runs-on: windows-latest
     timeout-minutes: 90
     env:
-      CUDA_ARCH_LIST: "75;80;86;89;90+PTX"
+      CUDA_ARCH_LIST: "61;75;80;86;89;90;90-virtual"
     steps:
       - uses: actions/checkout@v4
 
@@ -131,7 +133,7 @@ jobs:
         uses: mamba-org/setup-micromamba@v2
         with:
           environment-name: cudatk
-          create-args: -y -c nvidia cuda-toolkit=12.8
+          create-args: -y -c nvidia cuda-toolkit=12.4
 
       - name: check toolkit layout
         run: |
