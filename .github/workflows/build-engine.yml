@@ -144,7 +144,7 @@ jobs:
         uses: mamba-org/setup-micromamba@v2
         with:
           environment-name: cudatk
-          create-args: -y -c nvidia cuda-toolkit=12.4
+          create-args: -y -c nvidia cuda-compiler=12.4 cuda-cudart-dev=12.4 cuda-cudart-static=12.4 cuda-libraries-dev=12.4 cuda-nvvm=12.4
 
       - name: check toolkit layout
         run: |
