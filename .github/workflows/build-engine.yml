@@ -190,6 +190,14 @@ jobs:
       - name: build
         run: cmake --build build-cuda --config Release --parallel 4
 
+      - name: upload raw CUDA build (post-mortem insurance)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cuda-build-dlls
+          path: build-cuda/**/*.dll
+          retention-days: 5
+
       - name: sanity-check fresh CUDA DLLs (qt_version handshake)
         run: |
           python - <<'PY'
@@ -210,7 +218,7 @@ jobs:
           # Staged load, leaf-first: whichever DLL fails first is the real
           # culprit; dumpbin then shows exactly who it wanted.
           import subprocess
-          for nm in ('ggml-base.dll', 'ggml.dll', 'ggml-cuda.dll', 'qwen.dll'):
+          for nm in ('ggml-base.dll', 'ggml-cpu.dll', 'ggml-cuda.dll', 'ggml.dll', 'qwen.dll'):
               hits = list(pathlib.Path('build-cuda').rglob(nm))
               if not hits:
                   print('ARTIFACT MISSING:', nm)
