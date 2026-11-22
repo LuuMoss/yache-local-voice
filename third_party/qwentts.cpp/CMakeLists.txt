@@ -9,6 +9,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(VERSION_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/version.h")
 add_custom_target(version ALL
     COMMAND "${CMAKE_COMMAND}" "-DSRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}" "-DOUTPUT=${VERSION_OUTPUT}"
+            # FORK PATCH (yache-local-voice): `cmake -P` script mode does NOT
+            # inherit the parent's cache entries, so forward the upstream
+            # revision injected by CI (-DQT_REVISION=<sha> -DQT_DATE=<date>)
+            # explicitly; otherwise git probes walk up into the packaging
+            # repo and stamp that repo's HEAD instead of 6fae929.
+            $<$<BOOL:${QT_REVISION}>:-DQT_REVISION=${QT_REVISION}>
+            $<$<BOOL:${QT_DATE}>:-DQT_DATE=${QT_DATE}>
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/version.cmake"
     BYPRODUCTS "${VERSION_OUTPUT}"
     COMMENT "Checking git version"

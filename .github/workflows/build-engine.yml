@@ -107,9 +107,10 @@ jobs:
   # The resulting yache-cuda-windows-x64.zip is the exact asset
   # dashboard/download.py pins by tag + sha256 + byte size.
   #
-  # The Windows GitHub runners ship NO CUDA toolkit, so the toolkit is
-  # installed from NVIDIA's official `nvidia` conda channel (conda itself
-  # is preinstalled on the image).  The runners' MSVC (VS 18 / cl 14.5x)
+  # The Windows GitHub runners ship NO CUDA toolkit (and no preinstalled
+  # conda either), so the toolkit is installed with the official
+  # mamba-org/setup-micromamba action from NVIDIA's `nvidia` conda channel
+  # (NVIDIA-published packages).  The runners' MSVC (VS 18 / cl 14.5x)
   # is newer than what CUDA 12.8 clamps as supported, hence
   # -allow-unsupported-compiler; no GPU exists on the runner, so fatbin
   # targets are pinned explicitly (Turing..Blackwell + PTX, covering the
@@ -127,16 +128,16 @@ jobs:
         run: python -m pip install --quiet cmake==4.4.5 ninja
 
       - name: install CUDA toolkit from NVIDIA conda channel
-        run: |
-          conda install -y -q -c nvidia cuda-toolkit=12.8
-          echo "$CONDA_PREFIX/Library/bin" >> "$GITHUB_PATH"
-          "$CONDA_PREFIX/Library/bin/nvcc.exe" --version
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: cudatk
+          create-args: -y -c nvidia cuda-toolkit=12.8
 
       - name: configure (CUDA backend)
         run: >
           cmake -S third_party/qwentts.cpp -B build-cuda -A x64
           -DQWEN_SHARED=ON -DGGML_NATIVE=OFF -DGGML_CUDA=ON
-          -DCUDAToolkit_ROOT="$CONDA_PREFIX/Library"
+          CUDAToolkit_ROOT="$MAMBA_ROOT_PREFIX/envs/cudatk/Library"
           -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCH_LIST"
           -DCMAKE_CUDA_FLAGS=-allow-unsupported-compiler
           -DQT_REVISION="$QT_REVISION" -DQT_DATE="$QT_DATE"
@@ -167,7 +168,7 @@ jobs:
           done
           # NVIDIA redistributables straight from the toolkit installed
           # above (NVIDIA's own conda packages, Library/bin layout).
-          cuda_bin="$CONDA_PREFIX/Library/bin"
+          cuda_bin="$MAMBA_ROOT_PREFIX/envs/cudatk/Library/bin"
           for f in cudart64_12.dll cublas64_12.dll cublasLt64_12.dll; do
             [ -f "$cuda_bin/$f" ] || { echo "runner toolkit missing $f ($cuda_bin)" >&2; exit 1; }
             cp "$cuda_bin/$f" "dist-cuda/$f"
