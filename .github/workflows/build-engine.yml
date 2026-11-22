@@ -215,7 +215,9 @@ jobs:
           tk_bin = os.path.join(os.environ.get('CUDA_TK_PATH') or '', 'bin')
           tk_dlls = {f.lower() for f in os.listdir(tk_bin)} if tk_bin and os.path.isdir(tk_bin) else set()
           built = {p.name.lower() for p in pathlib.Path('build-cuda').rglob('*.dll')}
-          SYSTEM = {'kernel32.dll','msvcp140.dll','vcruntime140.dll','vcruntime140_1.dll','nvcuda.dll'}
+          sysdir = os.path.join(os.environ.get('SystemRoot', r'C:\\Windows'), 'System32')
+          SYSTEM = {f.lower() for f in os.listdir(sysdir) if f.lower().endswith('.dll')}
+          SYSTEM |= {'msvcp140.dll','vcruntime140.dll','vcruntime140_1.dll','nvcuda.dll','msvcp140_1.dll','msvcp140_2.dll'}
           targets = ['qwen.dll','ggml.dll','ggml-base.dll','ggml-cpu.dll','ggml-cuda.dll']
           bad = []
           for nm in targets:
