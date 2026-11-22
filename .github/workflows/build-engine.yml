@@ -150,6 +150,7 @@ jobs:
         run: >
           cmake -S third_party/qwentts.cpp -B build-cuda -G Ninja
           -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_CUDA_COMPILER="$MAMBA_ROOT_PREFIX/envs/cudatk/Library/bin/nvcc.exe"
           -DQWEN_SHARED=ON -DGGML_NATIVE=OFF -DGGML_CUDA=ON
           -DCUDAToolkit_ROOT="$MAMBA_ROOT_PREFIX/envs/cudatk/Library"
           -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCH_LIST"
