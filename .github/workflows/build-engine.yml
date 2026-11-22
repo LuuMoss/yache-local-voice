@@ -207,6 +207,22 @@ jobs:
               dirs.add(os.path.join(tk, 'bin'))
           for d in sorted(dirs):
               os.add_dll_directory(d)
+          # Staged load, leaf-first: whichever DLL fails first is the real
+          # culprit; dumpbin then shows exactly who it wanted.
+          import subprocess
+          for nm in ('ggml-base.dll', 'ggml.dll', 'ggml-cuda.dll', 'qwen.dll'):
+              hits = list(pathlib.Path('build-cuda').rglob(nm))
+              if not hits:
+                  print('ARTIFACT MISSING:', nm)
+                  continue
+              p = hits[0].resolve()
+              try:
+                  ctypes.CDLL(str(p))
+                  print('LOAD OK:', nm)
+              except OSError as e:
+                  print('LOAD FAIL:', nm, '->', e)
+                  subprocess.run(['dumpbin', '/dependents', str(p)])
+                  raise
           lib = ctypes.CDLL(str(dll))
           lib.qt_version.restype = ctypes.c_char_p
           v = lib.qt_version().decode()
