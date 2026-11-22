@@ -113,7 +113,10 @@ jobs:
   # (NVIDIA-published packages).  The runners' MSVC (VS 18 / cl 14.5x)
   # is newer than what CUDA 12.4 clamps as supported, hence
   # -allow-unsupported-compiler; no GPU exists on the runner, so fatbin
-  # targets are pinned explicitly.  CUDA 12.4 matches the NVIDIA runtime
+  # generator is Ninja (NOT the VS generator: CMake's VS CUDA path demands
+  # the CUDA MSBuild integration, which NVIDIA's conda packages do not
+  # ship; Ninja + msvc-dev-cmd + CUDAToolkit_ROOT needs no integration).
+  # Fatbin targets are pinned explicitly.  CUDA 12.4 matches the NVIDIA runtime
   # DLLs bundled in the pack (and the official llama.cpp cuda-12.4 line,
   # which still supports Pascal sm_61).  CMake 4.4 dropped the legacy
   # "90+PTX" syntax, so the PTX copy uses the -virtual suffix.
@@ -129,6 +132,9 @@ jobs:
       - name: install pinned cmake + ninja
         run: python -m pip install --quiet cmake==4.4.5 ninja
 
+      - name: setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: install CUDA toolkit from NVIDIA conda channel
         uses: mamba-org/setup-micromamba@v2
         with:
@@ -142,7 +148,8 @@ jobs:
 
       - name: configure (CUDA backend)
         run: >
-          cmake -S third_party/qwentts.cpp -B build-cuda -A x64
+          cmake -S third_party/qwentts.cpp -B build-cuda -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
           -DQWEN_SHARED=ON -DGGML_NATIVE=OFF -DGGML_CUDA=ON
           -DCUDAToolkit_ROOT="$MAMBA_ROOT_PREFIX/envs/cudatk/Library"
           -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCH_LIST"
@@ -169,7 +176,7 @@ jobs:
         run: |
           mkdir -p dist-cuda dist-cuda-build
           for f in ggml-base ggml-cpu ggml ggml-cuda qwen; do
-            src=$(find build-cuda -ipath "*release*" -iname "$f.dll" | head -1)
+            src=$(find build-cuda -iname "$f.dll" | head -1)
             [ -n "$src" ] || { echo "missing $f.dll in build output" >&2; exit 1; }
             cp "$src" "dist-cuda/$f.dll"
           done
