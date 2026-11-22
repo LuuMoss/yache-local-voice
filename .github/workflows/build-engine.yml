@@ -63,7 +63,7 @@ jobs:
           import ctypes, os, pathlib
           dll = next(p for p in pathlib.Path('build').rglob('qwen.dll'))
           print('fresh build at', dll)
-          os.add_dll_directory(str(dll.parent))
+          os.add_dll_directory(str(dll.parent.resolve()))
           lib = ctypes.CDLL(str(dll))
           lib.qt_version.restype = ctypes.c_char_p
           v = lib.qt_version().decode()
@@ -102,23 +102,43 @@ jobs:
   # redistributable DLLs (cudart / cublas / cublasLt).  Building the five
   # engine DLLs here keeps every binary this plugin distributes traceable
   # to third_party/qwentts.cpp; the NVIDIA DLLs are copied verbatim from
-  # the CUDA 12.x toolkit preinstalled on the GitHub Windows runners
-  # (NVIDIA's own signed redistributables, see NOTICE.md).
+  # the NVIDIA-published conda packages (NVIDIA's own signed
+  # redistributables, see NOTICE.md).
   # The resulting yache-cuda-windows-x64.zip is the exact asset
   # dashboard/download.py pins by tag + sha256 + byte size.
+  #
+  # The Windows GitHub runners ship NO CUDA toolkit, so the toolkit is
+  # installed from NVIDIA's official `nvidia` conda channel (conda itself
+  # is preinstalled on the image).  The runners' MSVC (VS 18 / cl 14.5x)
+  # is newer than what CUDA 12.8 clamps as supported, hence
+  # -allow-unsupported-compiler; no GPU exists on the runner, so fatbin
+  # targets are pinned explicitly (Turing..Blackwell + PTX, covering the
+  # 3090 sm_86 this pack is primarily validated against).
   # ------------------------------------------------------------------
   build-cuda-pack:
     runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CUDA_ARCH_LIST: "75;80;86;89;90+PTX"
     steps:
       - uses: actions/checkout@v4
 
       - name: install pinned cmake + ninja
         run: python -m pip install --quiet cmake==4.4.5 ninja
 
+      - name: install CUDA toolkit from NVIDIA conda channel
+        run: |
+          conda install -y -q -c nvidia cuda-toolkit=12.8
+          echo "$CONDA_PREFIX/Library/bin" >> "$GITHUB_PATH"
+          "$CONDA_PREFIX/Library/bin/nvcc.exe" --version
+
       - name: configure (CUDA backend)
         run: >
           cmake -S third_party/qwentts.cpp -B build-cuda -A x64
           -DQWEN_SHARED=ON -DGGML_NATIVE=OFF -DGGML_CUDA=ON
+          -DCUDAToolkit_ROOT="$CONDA_PREFIX/Library"
+          -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCH_LIST"
+          -DCMAKE_CUDA_FLAGS=-allow-unsupported-compiler
           -DQT_REVISION="$QT_REVISION" -DQT_DATE="$QT_DATE"
 
       - name: build
@@ -129,7 +149,7 @@ jobs:
           python - <<'PY'
           import ctypes, os, pathlib
           dll = next(p for p in pathlib.Path('build-cuda').rglob('qwen.dll'))
-          os.add_dll_directory(str(dll.parent))
+          os.add_dll_directory(str(dll.parent.resolve()))
           lib = ctypes.CDLL(str(dll))
           lib.qt_version.restype = ctypes.c_char_p
           v = lib.qt_version().decode()
@@ -145,8 +165,9 @@ jobs:
             [ -n "$src" ] || { echo "missing $f.dll in build output" >&2; exit 1; }
             cp "$src" "dist-cuda/$f.dll"
           done
-          # NVIDIA redistributables straight from the runner's toolkit.
-          cuda_bin=$(echo /c/Program\ Files/NVIDIA\ GPU\ Computing\ Toolkit/CUDA/v12*/bin)
+          # NVIDIA redistributables straight from the toolkit installed
+          # above (NVIDIA's own conda packages, Library/bin layout).
+          cuda_bin="$CONDA_PREFIX/Library/bin"
           for f in cudart64_12.dll cublas64_12.dll cublasLt64_12.dll; do
             [ -f "$cuda_bin/$f" ] || { echo "runner toolkit missing $f ($cuda_bin)" >&2; exit 1; }
             cp "$cuda_bin/$f" "dist-cuda/$f"
