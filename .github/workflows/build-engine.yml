@@ -1,0 +1,97 @@
+name: build-engine
+
+# Builds the four engine DLLs this plugin ships at vendor/qwentts_cpp/lib/
+# (ggml-base, ggml-cpu, ggml, qwen) from the exact upstream sources vendored
+# under third_party/qwentts.cpp/ (ServeurpersoCom/qwentts.cpp @ 6fae92914045
+# cd83364d2845ceaa0f7969727319, CPU backend only — the CUDA runtime is a
+# separate download pack), then emits GitHub build provenance for the
+# vendored DLLs so the Hermes plugin catalog can verify them with:
+#
+#   gh attestation verify <file> --repo LuuMoss/yache-local-voice \
+#       --source-digest <pinned-commit-sha> \
+#       --predicate-type https://slsa.dev/provenance/v1
+#
+# third_party/qwentts.cpp/tools/version.cmake carries one fork patch that
+# lets CI inject the exact revision/date without a .git directory, keeping
+# the qt_version() handshake byte-identical to the upstream build. The
+# sanity-check step below enforces that handshake on the fresh build.
+
+on:
+  workflow_dispatch: {}
+  push:
+    tags:
+      - "engine-v*"
+
+permissions:
+  contents: read
+  attestations: write
+  id-token: write
+
+env:
+  QT_REVISION: 6fae92914045cd83364d2845ceaa0f7969727319
+  QT_DATE: "2026-09-28"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pin CMake 4.x + Ninja from PyPI: the MSVC-bundled cmake 3.31.6-msvc6
+      # shipped on the Windows images dies with STATUS_STACK_BUFFER_OVERRUN
+      # (0xC0000409) during ggml's ASM compiler ABI detection. Verified on a
+      # real host 2026-11-22; cmake 4.4.5 configures and builds clean.
+      - name: install pinned cmake + ninja
+        run: python -m pip install --quiet cmake==4.4.5 ninja
+
+      - name: configure
+        run: >
+          cmake -S third_party/qwentts.cpp -B build -A x64
+          -DQWEN_SHARED=ON -DGGML_NATIVE=OFF
+          -DQT_REVISION="$QT_REVISION" -DQT_DATE="$QT_DATE"
+
+      - name: build
+        run: cmake --build build --config Release --parallel 4
+
+      - name: sanity-check fresh DLLs (qt_version handshake)
+        run: |
+          python - <<'PY'
+          import ctypes, os, pathlib
+          dll = next(p for p in pathlib.Path('build').rglob('qwen.dll'))
+          print('fresh build at', dll)
+          os.add_dll_directory(str(dll.parent))
+          lib = ctypes.CDLL(str(dll))
+          lib.qt_version.restype = ctypes.c_char_p
+          v = lib.qt_version().decode()
+          print('fresh qwen.dll qt_version =', v)
+          assert v.split()[0] == os.environ['QT_REVISION'], 'version handshake mismatch'
+          PY
+
+      - name: collect fresh DLLs + checksums vs vendored
+        run: |
+          mkdir -p dist
+          for f in ggml-base ggml-cpu ggml qwen; do
+            src=$(find build -ipath "*release*" -iname "$f.dll" | head -1)
+            [ -n "$src" ] || { echo "missing $f.dll in build output" >&2; exit 1; }
+            cp "$src" "dist/$f.dll"
+          done
+          sha256sum dist/*.dll vendor/qwentts_cpp/lib/*.dll
+
+      - name: upload fresh build (transparency)
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-dlls-fresh
+          path: dist/
+
+      - name: attest vendored DLLs (catalog gate)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            vendor/qwentts_cpp/lib/ggml-base.dll
+            vendor/qwentts_cpp/lib/ggml-cpu.dll
+            vendor/qwentts_cpp/lib/ggml.dll
+            vendor/qwentts_cpp/lib/qwen.dll

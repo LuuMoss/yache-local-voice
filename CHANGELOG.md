@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.1 — binary provenance (catalog review #158052)
+
+- Engine DLLs are now built from source in this repository: the exact
+  upstream `qwentts.cpp` sources (pinned at 6fae92914045cd83364d2845ceaa
+  0f7969727319, including its ggml submodule) are vendored under
+  `third_party/qwentts.cpp/`, and `.github/workflows/build-engine.yml`
+  rebuilds the four DLLs on every `engine-v*` tag and publishes SLSA build
+  provenance (`attested_binaries` in the plugin-catalog entry). The four
+  DLLs under `vendor/qwentts_cpp/lib/` are fresh builds from that tree.
+- Dropped the vendored `libsndfile` payload (`vendor/soundfile.py`,
+  `vendor/_soundfile.py`, `vendor/_soundfile_data/`,
+  `vendor/soundfile-0.14.0.dist-info`): the host already ships
+  `soundfile`, so the plugin now uses the host's copy instead of bundling
+  an unverified DLL.
 ## 0.1.0 — first public release (2026-11-19)
 - Voice cloning TTS on Qwen3-TTS 1.7B: fully local, zero cloud, zero API
   keys; any-reference voice cloning with your own recorded timbres.

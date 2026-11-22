@@ -54,6 +54,10 @@ For a source install the layout is identical: the repository root *is* the
 plugin body (skip `desktop/` and `docs/`), and `desktop/plugin.js` mirrors
 to `desktop-plugins/yache-local-voice/plugin.js`.
 
+The native engine DLLs in `vendor/qwentts_cpp/lib/` are built from the
+sources vendored under `third_party/` by this repository's own CI, with
+SLSA build provenance — see [docs/engine-provenance.md](docs/engine-provenance.md).
+
 ## Screenshots
 
 The one-glance status bar, the console doctor screen and the four settings pages:
@@ -183,4 +187,8 @@ hook would make it obsolete.
 
 ## Version history
 
+- **0.1.1** — engine DLLs rebuilt from source in this repository
+  (`third_party/` + CI + SLSA attestation); the vendored `libsndfile`
+  payload was dropped in favour of the host's `soundfile`. See
+  `CHANGELOG.md`.
 - **0.1.0** (2026-11-19) — first public release: local voice-cloning TTS (Qwen3-TTS 1.7B), self-managed STT environment with on-demand install and weights download wizard, wake word on the official built-in sherpa-onnx KWS engine, and a one-click CUDA accelerator pack shipped as GitHub Release asset `cuda-pack-v1`.

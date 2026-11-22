@@ -12,14 +12,32 @@ by Andres Marafioti, MIT License. Real-time Qwen3-TTS inference using
 CUDA graphs. Locally adapted: streaming CUDA-stream abort and model-dir
 plumbing adjusted for this plugin's zero-disk playback pipeline.
 
-## vendor/qwentts_cpp/ + lib/*.dll
+## vendor/qwentts_cpp/lib/*.dll + third_party/qwentts.cpp/
 
-Python bindings and prebuilt DLLs derived from `qwentts.cpp`
-(MIT License, "The omnivoice.cpp authors"), maintained as a local fork
-with a patched CUDA stream abort. The bundled `qwen.dll` and
-`ggml-*.dll` are built from that fork (CUDA-flavored build; the CUDA
-runtime itself is installed separately as the GPU accelerator pack from
-this repository's `cuda-pack-v1` release).
+The four bundled engine DLLs (`qwen.dll`, `ggml.dll`, `ggml-base.dll`,
+`ggml-cpu.dll`) are compiled from the `qwentts.cpp` engine
+(MIT License, "The omnivoice.cpp authors", upstream
+[ServeurpersoCom/qwentts.cpp](https://github.com/ServeurpersoCom/qwentts.cpp)).
+The exact upstream sources — pinned at commit
+`6fae92914045cd83364d2845ceaa0f7969727319` (2026-09-28), including its
+`ggml/` submodule at `40e16e4a814f7fe851a0c486fb9e8c722e957830` — are
+vendored under `third_party/qwentts.cpp/`, with one documented fork patch
+(`tools/version.cmake` learns the revision from cache variables so the
+engine builds from a tarball without a `.git` directory, keeping the
+`qt_version()` handshake byte-identical to an upstream build).
+
+A GitHub Actions workflow (`.github/workflows/build-engine.yml`) rebuilds
+the DLLs from that source tree on every `engine-v*` tag and publishes SLSA
+build provenance for the vendored files; the Hermes plugin catalog gates
+them via `attested_binaries` + `attestations: github`, verifiable with:
+
+    gh attestation verify <file> --repo LuuMoss/yache-local-voice \
+        --source-digest <pinned-commit-sha> \
+        --predicate-type https://slsa.dev/provenance/v1
+
+The CUDA runtime is not among these DLLs; GPU users install it separately
+as the accelerator pack (`yache-cuda-windows-x64.zip`) from this
+repository's Releases.
 
 ## Qwen3-TTS model weights
 
