@@ -144,20 +144,31 @@ jobs:
         uses: mamba-org/setup-micromamba@v2
         with:
           environment-name: cudatk
-          create-args: -y -c nvidia cuda-compiler=12.4 cuda-cudart-dev=12.4 cuda-cudart-static=12.4 cuda-libraries-dev=12.4 cuda-nvvm=12.4
+          create-args: -y -c nvidia cuda-compiler=12.4 cuda-cudart-dev=12.4 cuda-libraries-dev=12.4
 
       - name: check toolkit layout
         run: |
-          test -f "$MAMBA_ROOT_PREFIX/envs/cudatk/Library/bin/nvcc.exe"
-          "$MAMBA_ROOT_PREFIX/envs/cudatk/Library/bin/nvcc.exe" --version | tail -1
+          ENV="$MAMBA_ROOT_PREFIX/envs/cudatk"
+          NVCC=$(find "$ENV" -iname nvcc.exe | head -1)
+          echo "nvcc found at: '$NVCC'"
+          if [ -z "$NVCC" ]; then
+            echo "::error::nvcc.exe missing after cuda-compiler install; env tree follows:"
+            find "$ENV" -maxdepth 3 -type d | head -40
+            exit 1
+          fi
+          "$NVCC" --version | tail -1
+          echo "CUDA_NVCC=$NVCC" >> "$GITHUB_ENV"
+          # CUDAToolkit root = parent of nvcc's bin dir, native form
+          TK=$(dirname "$(dirname "$NVCC")")
+          echo "CUDA_TK=$(cygpath -w "$TK")" >> "$GITHUB_ENV"
 
       - name: configure (CUDA backend)
         run: >
           cmake -S third_party/qwentts.cpp -B build-cuda -G Ninja
           -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_CUDA_COMPILER="$MAMBA_ROOT_PREFIX/envs/cudatk/Library/bin/nvcc.exe"
+          -DCMAKE_CUDA_COMPILER="$CUDA_NVCC"
           -DQWEN_SHARED=ON -DGGML_NATIVE=OFF -DGGML_CUDA=ON
-          -DCUDAToolkit_ROOT="$MAMBA_ROOT_PREFIX/envs/cudatk/Library"
+          -DCUDAToolkit_ROOT="$CUDA_TK"
           -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCH_LIST"
           -DCMAKE_CUDA_FLAGS=-allow-unsupported-compiler
           -DQT_REVISION="$QT_REVISION" -DQT_DATE="$QT_DATE"
