@@ -107,11 +107,16 @@ jobs:
   # The resulting yache-cuda-windows-x64.zip is the exact asset
   # dashboard/download.py pins by tag + sha256 + byte size.
   #
-  # The Windows GitHub runners ship NO CUDA toolkit (and no preinstalled
-  # conda either), so the toolkit is installed with the official
-  # mamba-org/setup-micromamba action from NVIDIA's `nvidia` conda channel
-  # (NVIDIA-published packages).  The runners' MSVC (VS 18 / cl 14.5x)
-  # is newer than what CUDA 12.4 clamps as supported, hence
+  # The Windows GitHub runners ship NO CUDA toolkit, and NVIDIA's `nvidia`
+  # conda channel is a dead end for 12.4 on win-64: the 12.4.131 .tar.bz2
+  # build is a dead stub (empty deps) and the solver silently substitutes
+  # CUDA 13.3 .conda builds under a "12.4" version label (observed live:
+  # nvcc self-reports release 13.3, compute_61 rejected -- CUDA 13 dropped
+  # Pascal).  So the toolkit is assembled instead from NVIDIA's official
+  # redist archives (developer.download.nvidia.com, sha256 pinned below
+  # from NVIDIA's own redistrib_12.4.1.json index), flattened into one
+  # portable tree.  MSVC cl 19.44 (windows-2022) is drifted past CUDA
+  # 12.4's clamp, hence
   # -allow-unsupported-compiler; no GPU exists on the runner, so fatbin
   # generator is Ninja (NOT the VS generator: CMake's VS CUDA path demands
   # the CUDA MSBuild integration, which NVIDIA's conda packages do not
@@ -140,26 +145,32 @@ jobs:
       - name: setup MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: install CUDA toolkit from NVIDIA conda channel
-        uses: mamba-org/setup-micromamba@v2
-        with:
-          environment-name: cudatk
-          create-args: -y -c nvidia cuda-compiler=12.4 cuda-cudart-dev=12.4 cuda-libraries-dev=12.4
-
-      - name: check toolkit layout
+      - name: install CUDA 12.4.1 toolkit (NVIDIA official redist)
+        # Three NVIDIA-published archives, sha256-verified, flattened into
+        # one portable CUDA root: nvcc (compiler+ptxas+crt+nvvm), cudart
+        # (runtime DLL + full headers), libcublas (cublas/cublasLt DLL +
+        # headers).  Each zip holds one top dir; its content is merged into
+        # $RUNNER_TEMP/cuda-12.4.1 to form a standard toolkit layout.
         run: |
-          ENV="$MAMBA_ROOT_PREFIX/envs/cudatk"
-          NVCC=$(find "$ENV" -iname nvcc.exe | head -1)
-          echo "nvcc found at: '$NVCC'"
-          if [ -z "$NVCC" ]; then
-            echo "::error::nvcc.exe missing after cuda-compiler install; env tree follows:"
-            find "$ENV" -maxdepth 3 -type d | head -40
-            exit 1
-          fi
-          "$NVCC" --version | tail -1
-          echo "CUDA_NVCC=$NVCC" >> "$GITHUB_ENV"
-          # CUDAToolkit root = parent of nvcc's bin dir, native form
-          TK=$(dirname "$(dirname "$NVCC")")
+          set -euo pipefail
+          TK="$RUNNER_TEMP/cuda-12.4.1"
+          BASE=https://developer.download.nvidia.com/compute/cuda/redist
+          fetch() {
+            local rel="$1" sha="$2" f d
+            f=$(basename "$rel")
+            curl -fSL --retry 3 -o "$f" "$BASE/$rel"
+            echo "$sha  $f" | sha256sum -c -
+            rm -rf stage; unzip -q "$f" -d stage
+            d=$(find stage -mindepth 1 -maxdepth 1 -type d | head -1)
+            cp -a "$d"/. "$TK"/
+            rm -rf stage "$f"
+          }
+          mkdir -p "$TK"
+          fetch cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-12.4.131-archive.zip 3b14cf8dd9dda4a3b1a9682270d46eef775f018e17650187a8a448a06111f2b8
+          fetch cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.4.127-archive.zip 6a1c32e68ee1a95ca17334691ff9ad1ffe7f352c24a083d55e4c96b8063b2bcb
+          fetch libcublas/windows-x86_64/libcublas-windows-x86_64-12.4.5.8-archive.zip 698140f12da055a3709eee2e022fcfe7bc8edf31f30115e3f7a5c877a9491de5
+          "$TK/bin/nvcc.exe" --version | tail -1
+          echo "CUDA_NVCC=$(cygpath -w "$TK/bin/nvcc.exe")" >> "$GITHUB_ENV"
           echo "CUDA_TK=$(cygpath -w "$TK")" >> "$GITHUB_ENV"
 
       - name: configure (CUDA backend)
@@ -197,9 +208,9 @@ jobs:
             [ -n "$src" ] || { echo "missing $f.dll in build output" >&2; exit 1; }
             cp "$src" "dist-cuda/$f.dll"
           done
-          # NVIDIA redistributables straight from the toolkit installed
-          # above (NVIDIA's own conda packages, Library/bin layout).
-          cuda_bin="$MAMBA_ROOT_PREFIX/envs/cudatk/Library/bin"
+          # NVIDIA redistributables straight from the flattened redist
+          # toolkit installed above (standard bin/ layout, CUDA_TK export).
+          cuda_bin="$CUDA_TK/bin"
           for f in cudart64_12.dll cublas64_12.dll cublasLt64_12.dll; do
             [ -f "$cuda_bin/$f" ] || { echo "runner toolkit missing $f ($cuda_bin)" >&2; exit 1; }
             cp "$cuda_bin/$f" "dist-cuda/$f"
