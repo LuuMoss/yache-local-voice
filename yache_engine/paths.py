@@ -27,8 +27,19 @@ DEFAULT_TOKENIZER = "qwen-tokenizer-12hz-Q8_0.gguf"
 
 
 def hermes_home() -> Path:
-    env = os.environ.get("HERMES_HOME", "").strip()
-    home = Path(env).expanduser() if env else None
+    # Inside the host process, defer to the canonical resolver (profile-aware;
+    # reviewers: plugins must not re-implement HERMES_HOME discovery).  Under
+    # the standalone engine venv the host package is not importable, so fall
+    # back to the env-var / platform-default chain below.
+    home: Path | None = None
+    try:
+        from hermes_constants import get_hermes_home
+        home = Path(get_hermes_home()).expanduser()
+    except Exception:
+        pass
+    if home is None:
+        env = os.environ.get("HERMES_HOME", "").strip()
+        home = Path(env).expanduser() if env else None
     if home is None:
         if os.name == "nt":
             local = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")

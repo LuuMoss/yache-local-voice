@@ -95,3 +95,86 @@ jobs:
             vendor/qwentts_cpp/lib/ggml-cpu.dll
             vendor/qwentts_cpp/lib/ggml.dll
             vendor/qwentts_cpp/lib/qwen.dll
+
+  # ------------------------------------------------------------------
+  # CUDA runtime pack: the GPU option the plugin offers is a zip of the
+  # SAME engine sources built with -DGGML_CUDA=ON plus three NVIDIA
+  # redistributable DLLs (cudart / cublas / cublasLt).  Building the five
+  # engine DLLs here keeps every binary this plugin distributes traceable
+  # to third_party/qwentts.cpp; the NVIDIA DLLs are copied verbatim from
+  # the CUDA 12.x toolkit preinstalled on the GitHub Windows runners
+  # (NVIDIA's own signed redistributables, see NOTICE.md).
+  # The resulting yache-cuda-windows-x64.zip is the exact asset
+  # dashboard/download.py pins by tag + sha256 + byte size.
+  # ------------------------------------------------------------------
+  build-cuda-pack:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install pinned cmake + ninja
+        run: python -m pip install --quiet cmake==4.4.5 ninja
+
+      - name: configure (CUDA backend)
+        run: >
+          cmake -S third_party/qwentts.cpp -B build-cuda -A x64
+          -DQWEN_SHARED=ON -DGGML_NATIVE=OFF -DGGML_CUDA=ON
+          -DQT_REVISION="$QT_REVISION" -DQT_DATE="$QT_DATE"
+
+      - name: build
+        run: cmake --build build-cuda --config Release --parallel 4
+
+      - name: sanity-check fresh CUDA DLLs (qt_version handshake)
+        run: |
+          python - <<'PY'
+          import ctypes, os, pathlib
+          dll = next(p for p in pathlib.Path('build-cuda').rglob('qwen.dll'))
+          os.add_dll_directory(str(dll.parent))
+          lib = ctypes.CDLL(str(dll))
+          lib.qt_version.restype = ctypes.c_char_p
+          v = lib.qt_version().decode()
+          print('fresh CUDA qwen.dll qt_version =', v)
+          assert v.split()[0] == os.environ['QT_REVISION'], 'version handshake mismatch'
+          PY
+
+      - name: assemble yache-cuda-windows-x64.zip
+        run: |
+          mkdir -p dist-cuda dist-cuda-build
+          for f in ggml-base ggml-cpu ggml ggml-cuda qwen; do
+            src=$(find build-cuda -ipath "*release*" -iname "$f.dll" | head -1)
+            [ -n "$src" ] || { echo "missing $f.dll in build output" >&2; exit 1; }
+            cp "$src" "dist-cuda/$f.dll"
+          done
+          # NVIDIA redistributables straight from the runner's toolkit.
+          cuda_bin=$(echo /c/Program\ Files/NVIDIA\ GPU\ Computing\ Toolkit/CUDA/v12*/bin)
+          for f in cudart64_12.dll cublas64_12.dll cublasLt64_12.dll; do
+            [ -f "$cuda_bin/$f" ] || { echo "runner toolkit missing $f ($cuda_bin)" >&2; exit 1; }
+            cp "$cuda_bin/$f" "dist-cuda/$f"
+          done
+          python - <<'PY'
+          import zipfile
+          names = ['qwen.dll','ggml-cuda.dll','ggml-base.dll','ggml-cpu.dll','ggml.dll',
+                   'cudart64_12.dll','cublas64_12.dll','cublasLt64_12.dll']
+          with zipfile.ZipFile('dist-cuda-build/yache-cuda-windows-x64.zip','w',zipfile.ZIP_DEFLATED) as z:
+              for n in names: z.write(n, n, compress_type=zipfile.ZIP_DEFLATED)
+          PY
+          python - <<'PY'
+          import zipfile
+          names = ['qwen.dll','ggml-cuda.dll','ggml-base.dll','ggml-cpu.dll','ggml.dll',
+                   'cudart64_12.dll','cublas64_12.dll','cublasLt64_12.dll']
+          with zipfile.ZipFile('dist-cuda-build/yache-cuda-windows-x64.zip') as z:
+              for n in names:
+                  assert n in z.namelist(), f'zip missing {n}'
+          PY
+          sha256sum dist-cuda-build/yache-cuda-windows-x64.zip
+
+      - name: upload cuda pack (transparency)
+        uses: actions/upload-artifact@v4
+        with:
+          name: yache-cuda-windows-x64
+          path: dist-cuda-build/yache-cuda-windows-x64.zip
+
+      - name: attest cuda pack
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist-cuda-build/yache-cuda-windows-x64.zip

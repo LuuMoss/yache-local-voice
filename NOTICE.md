@@ -37,7 +37,15 @@ them via `attested_binaries` + `attestations: github`, verifiable with:
 
 The CUDA runtime is not among these DLLs; GPU users install it separately
 as the accelerator pack (`yache-cuda-windows-x64.zip`) from this
-repository's Releases.
+repository's Releases.  That pack is built by the same CI workflow
+(`build-cuda-pack` job) from the same in-tree sources with
+`-DGGML_CUDA=ON` — its five engine DLLs (`qwen.dll`, `ggml-cuda.dll`,
+`ggml-base.dll`, `ggml-cpu.dll`, `ggml.dll`) carry the same SLSA
+provenance attestation.  The pack additionally bundles three NVIDIA
+redistributable DLLs copied verbatim from the CUDA 12.x toolkit
+(`cudart64_12.dll`, `cublas64_12.dll`, `cublasLt64_12.dll`), which are
+NVIDIA's own signed binaries redistributed under the NVIDIA CUDA Toolkit
+License Agreement (redistributable components).
 
 ## Qwen3-TTS model weights
 

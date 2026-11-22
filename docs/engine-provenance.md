@@ -61,3 +61,23 @@ Use CMake >= 4.0 (e.g. `pip install cmake`). Outputs land in `build\Release\`.
 - `vendor/_soundfile_data/libsndfile_x64.dll` was removed in 0.1.1: the
   host environment already provides Python `soundfile`, so the plugin uses
   the host's copy instead of bundling its own.
+
+## The CUDA accelerator pack
+
+GPU users get `yache-cuda-windows-x64.zip` (downloaded by the panel's
+one-click installer).  The `build-cuda-pack` CI job builds the same
+engine sources with `-DGGML_CUDA=ON` on the same runner, then bundles
+the five engine DLLs together with three NVIDIA redistributables
+(`cudart64_12.dll`, `cublas64_12.dll`, `cublasLt64_12.dll`) copied
+verbatim from the CUDA 12.x toolkit.  The whole zip is attested the
+same way:
+
+```bash
+gh attestation verify yache-cuda-windows-x64.zip \
+  --repo LuuMoss/yache-local-voice \
+  --predicate-type https://slsa.dev/provenance/v1
+```
+
+`dashboard/download.py` pins this asset by release tag, SHA-256 and
+exact byte size in source, so a tampered relay cannot sneak a different
+payload through.

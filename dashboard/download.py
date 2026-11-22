@@ -19,8 +19,9 @@ frontend polls it), resumable Range downloads, per-session endpoint probing
   * cancel: one marker file next to the state JSON; workers poll it.
 
 Endpoints: model downloads race huggingface.co against hf-mirror.com (TLS +
-first-128-KB throughput); the GPU pack prefers direct GitHub and falls back
-to a public gh-proxy mirror.
+first-128-KB throughput).  The GPU accelerator pack is fetched from
+github.com only — no third-party mirrors — and its SHA-256 and exact byte
+size are pinned in source below, so no relay can swap the payload.
 """
 
 from __future__ import annotations
@@ -57,16 +58,21 @@ _CHUNK = 262144
 HF_REPO = "Serveurperso/Qwen3-TTS-GGUF"
 HF_ENDPOINTS = ["https://huggingface.co", "https://hf-mirror.com"]
 
-# Our GitHub release hosting the CUDA accelerator zip. metadata.json lives in
-# the same release and carries {asset, sha256, bytes}: the plugin never trusts
-# an archive without the digest, and the byte count gives the progress bar an
-# honest denominator before the first MB has moved.
+# Our GitHub release hosting the CUDA accelerator zip.  Reviewers: a
+# checksum fetched from the same source as the archive proves nothing, so
+# the pack's identity is pinned HERE in source — SHA-256 + exact byte size
+# — not read from a same-origin metadata.json at runtime.  The pack is a
+# versioned release asset under the plugin's v0.1.0 tag (not a moving
+# tag), built and SLSA-attested by the repo's own CI workflow
+# (.github/workflows/build-engine.yml, build-cuda-pack job).  Update both
+# constants together whenever the pack is rebuilt.
 GPU_REPO = "LuuMoss/yache-local-voice"
-GPU_TAG = "cuda-pack-v1"
+GPU_TAG = "v0.1.0"
 GPU_ASSET = "yache-cuda-windows-x64.zip"
-GPU_META = "metadata.json"
-GPU_ENDPOINTS = ["https://github.com", "https://gh-proxy.com/https://github.com",
-                 "https://ghfast.top/https://github.com"]
+GPU_SHA256 = "f5777fd18c1489f4648b3053bf5ad6d14b760d6d919a6b50bdbc4dd34ac7a435"
+GPU_BYTES = 543568511
+GPU_META = "metadata.json"   # kept in the release for bookkeeping only
+GPU_ENDPOINTS = ["https://github.com"]
 GPU_GITHUB = GPU_ENDPOINTS[0]      # the ramp-up-prone mainline (see pick)
 
 # ---- catalog: real values from the HF model card (0.6b has no voicedesign) ----
@@ -180,14 +186,12 @@ def _open_range(url: str, start: int):
 
 def _speed_test(url: str, timeout: float = 6.0) -> Optional[float]:
     """Seconds until the first response bytes arrive; None on failure (DNS,
-    TLS, timeout, HTTP error). TLS-tolerant (cert problems are the norm
-    behind corporate proxies; connectivity is what we actually measure).
+    TLS, timeout, HTTP error).  TLS verification stays ON everywhere —
+    reviewers: no disabled certificate checks in this plugin.
     Small files are fine: any 2xx body counts, the size threshold was a
     rookie mistake on 4.9 KB READMEs."""
     import ssl
     ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
     t0 = time.monotonic()
     resp = None
     try:
@@ -897,63 +901,31 @@ def _run_gpu(st: Dict[str, Any]) -> None:
         # no re-download, no double count (base stays 0, total = pack size).
         dead: "set[str]" = set()
         while True:
-            # ① metadata FIRST (4.9 KB of JSON — even the bare GitHub leg
-            # that cannot stream a 543 MB body reads it fine). Its "bytes"
-            # field tells the throughput probe where the file's cold middle
-            # is, so the leg is crowned AFTER the true size is known: the
-            # sample aims at the 1/3 mark, never the warmed CDN head that
-            # crowned ghfast at 9 MB/s while the body crawled at 0.04
-            # (owner's 2026-11-19 sighting).
-            base = None
-            for cand in GPU_ENDPOINTS:
-                if cand in dead:
-                    continue
-                try:
-                    _d, _m = _gpu_urls(cand)
-                    with _get(_m, 20.0) as r:
-                        md = json.loads(r.read().decode("utf-8"))
-                    want_sha = str(md.get("sha256") or "").lower()
-                    zip_bytes = int(md.get("bytes") or 0) or None
-                    base = cand
-                    _log.info(_i18n.ui("GPU 元数据: 腿=%s 字节=%s", "gpu metadata: leg=%s bytes=%s"),
-            cand, zip_bytes)
-                    break
-                except Exception as e:
-                    dead.add(cand)
-                    _log.warning(_i18n.ui("GPU 腿 %s: metadata.json 失败（%s）—— 换腿（死腿=%s）",
-                         "gpu leg %s: metadata.json failed (%s) — rotating (dead=%s)"),
-               cand, type(e).__name__, sorted(dead))
-            if base is None:
-                st.update(state="error",
-                          note=_i18n.ui(
-                              "GitHub 和镜像都读不到 metadata.json——需翻墙？",
-                              "cannot read metadata.json from GitHub or its "
-                              "mirrors — proxy/VPN needed?"))
-                _save(st)
-                return
-            if not re.fullmatch(r"[0-9a-f]{64}", want_sha or ""):
-                st.update(state="error", note="metadata.json has no sha256 digest")
-                _save(st)
-                return
-            # ② crown the real-work horse on a DUAL sample (1 MB head +
-            # 1 MB at the 1/3 cold mark, size now known — best of the two).
-            # A dead leg scores None; a warm-head impostor that crawls on
-            # the body loses both samples and yields its seat by itself.
+            # The pack's identity is PINNED in source (GPU_SHA256 + exact
+            # GPU_BYTES above): no same-origin metadata round-trip to trust
+            # or distrust, and the throughput probe knows the real size up
+            # front so it samples the file's cold 1/3 mark right away.
+            want_sha = GPU_SHA256
+            zip_bytes = GPU_BYTES
+            # Crown the real-work horse on a DUAL sample (1 MB head + 1 MB
+            # at the 1/3 cold mark).  A dead leg scores None; a warm-head
+            # impostor that crawls on the body loses both samples and
+            # yields its seat by itself.
             try:
                 base, scores = pick_gpu_endpoint(exclude=dead, size=zip_bytes)
             except NoEndpointError as e:
                 st.update(state="error",
                           note=_i18n.ui(
-                              "三条腿对真文件体实测都跑不动——开个翻墙再点就是满速；"
-                              "或稍等片刻再试（免费镜像线路全天波动，回血就能下）",
-                              "no leg sustained the real file body — switch on "
-                              "a proxy/VPN for full speed, or retry in a while "
-                              "(free mirror legs fluctuate all day; they "
-                              "recover). Details: " + str(e)[:120]))
+                              "直连 GitHub 实测跑不动这个大正文——开个翻墙再点就是满速；"
+                              "或稍等片刻再试（线路全天波动，会回血）",
+                              "bare GitHub cannot sustain the real file body — "
+                              "switch on a proxy/VPN for full speed, or retry "
+                              "in a while (the tunnel fluctuates all day; it "
+                              "recovers). Details: " + str(e)[:120]))
                 _save(st)
                 return
             st["endpoint"] = base
-            dl, meta = _gpu_urls(base)
+            dl, _meta = _gpu_urls(base)
             # Watchdog line = 40% of the speed the OTHER live legs promised
             # (a score is seconds-per-MB; invert to B/s). Owner's 22:46 WARP
             # case: gh-proxy's warm local CDN won the 12 s race at 0.34 MB/s
@@ -992,9 +964,9 @@ def _run_gpu(st: Dict[str, Any]) -> None:
             if len(dead) >= len(GPU_ENDPOINTS):
                 st["state"] = "interrupted"
                 st["note"] = _i18n.ui(
-                    "三条腿都试过一轮没走通——进度还在，按「续传」会重新测速换腿",
-                    "every leg was tried this round — progress kept; press "
-                    "resume to re-probe all legs")
+                    "GitHub 线路这一轮没走通——进度还在，按「续传」会重新测速",
+                    "the GitHub leg failed this round — progress kept; press "
+                    "resume to re-probe")
                 _save(st)
                 return
             st.update(state="running", mbps=None, eta_s=None,
@@ -1312,7 +1284,7 @@ def wake_model_root() -> Path:
     (_ensure_sherpa_model) downloads into this same root, and the per-model
     folder names below are the release's own dir names, so models placed by
     this pipeline pass the host's own readiness scan unchanged."""
-    home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+    home = str(_p.hermes_home())
     return Path(home) / "cache" / "wakewords"
 
 
