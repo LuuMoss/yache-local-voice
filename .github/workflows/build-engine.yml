@@ -195,12 +195,18 @@ jobs:
           python - <<'PY'
           import ctypes, os, pathlib
           dll = next(p for p in pathlib.Path('build-cuda').rglob('qwen.dll'))
-          os.add_dll_directory(str(dll.parent.resolve()))
-          # ggml-cuda.dll links CUDA::cudart/cublas shared — the runners have
-          # no system CUDA install, so point at the redist toolkit's bin too.
+          # Ninja (single-config) scatters the build outputs across
+          # subdirs — ggml.dll/ggml-base.dll do NOT sit next to qwen.dll
+          # the way the VS generator's flat Release/ folder does.  Add
+          # every dir that holds a built DLL, plus the redist toolkit's
+          # bin (cudart64_12/cublas64_12/cublasLt64_12 for ggml-cuda.dll).
+          dirs = {str(p.parent.resolve()) for p in pathlib.Path('build-cuda').rglob('*.dll')}
+          dirs.add(str(dll.parent.resolve()))
           tk = os.environ.get('CUDA_TK')
           if tk:
-              os.add_dll_directory(os.path.join(tk, 'bin'))
+              dirs.add(os.path.join(tk, 'bin'))
+          for d in sorted(dirs):
+              os.add_dll_directory(d)
           lib = ctypes.CDLL(str(dll))
           lib.qt_version.restype = ctypes.c_char_p
           v = lib.qt_version().decode()
