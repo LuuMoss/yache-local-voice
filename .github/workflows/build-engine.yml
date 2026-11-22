@@ -133,11 +133,16 @@ jobs:
           environment-name: cudatk
           create-args: -y -c nvidia cuda-toolkit=12.8
 
+      - name: check toolkit layout
+        run: |
+          test -f "$MAMBA_ROOT_PREFIX/envs/cudatk/Library/bin/nvcc.exe"
+          "$MAMBA_ROOT_PREFIX/envs/cudatk/Library/bin/nvcc.exe" --version | tail -1
+
       - name: configure (CUDA backend)
         run: >
           cmake -S third_party/qwentts.cpp -B build-cuda -A x64
           -DQWEN_SHARED=ON -DGGML_NATIVE=OFF -DGGML_CUDA=ON
-          CUDAToolkit_ROOT="$MAMBA_ROOT_PREFIX/envs/cudatk/Library"
+          -DCUDAToolkit_ROOT="$MAMBA_ROOT_PREFIX/envs/cudatk/Library"
           -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCH_LIST"
           -DCMAKE_CUDA_FLAGS=-allow-unsupported-compiler
           -DQT_REVISION="$QT_REVISION" -DQT_DATE="$QT_DATE"
