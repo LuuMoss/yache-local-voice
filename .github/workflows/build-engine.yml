@@ -122,7 +122,12 @@ jobs:
   # "90+PTX" syntax, so the PTX copy uses the -virtual suffix.
   # ------------------------------------------------------------------
   build-cuda-pack:
-    runs-on: windows-latest
+    # windows-2022 = VS2022 image.  windows-latest now ships VS2026
+    # (MSVC 14.5x) whose C++ headers crash CUDA 12.4's cudafe++ frontend
+    # with ACCESS_VIOLATION during compiler-id; CUDA 12.4 and VS2022 are
+    # the era-matched pair (allow-unsupported-compiler covers the small
+    # version drift).  The CPU job keeps plain windows-latest.
+    runs-on: windows-2022
     timeout-minutes: 90
     env:
       CUDA_ARCH_LIST: "61;75;80;86;89;90;90-virtual"
