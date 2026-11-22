@@ -196,6 +196,11 @@ jobs:
           import ctypes, os, pathlib
           dll = next(p for p in pathlib.Path('build-cuda').rglob('qwen.dll'))
           os.add_dll_directory(str(dll.parent.resolve()))
+          # ggml-cuda.dll links CUDA::cudart/cublas shared — the runners have
+          # no system CUDA install, so point at the redist toolkit's bin too.
+          tk = os.environ.get('CUDA_TK')
+          if tk:
+              os.add_dll_directory(os.path.join(tk, 'bin'))
           lib = ctypes.CDLL(str(dll))
           lib.qt_version.restype = ctypes.c_char_p
           v = lib.qt_version().decode()
