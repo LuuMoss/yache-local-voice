@@ -169,6 +169,9 @@ jobs:
           fetch cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-12.4.131-archive.zip 3b14cf8dd9dda4a3b1a9682270d46eef775f018e17650187a8a448a06111f2b8
           fetch cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.4.127-archive.zip 6a1c32e68ee1a95ca17334691ff9ad1ffe7f352c24a083d55e4c96b8063b2bcb
           fetch libcublas/windows-x86_64/libcublas-windows-x86_64-12.4.5.8-archive.zip 698140f12da055a3709eee2e022fcfe7bc8edf31f30115e3f7a5c877a9491de5
+          # cuda_fp16.h includes <nv/target> -- that header ships in the
+          # separate cuda_cccl redist (3 MB of headers, no DLLs).
+          fetch cuda_cccl/windows-x86_64/cuda_cccl-windows-x86_64-12.4.127-archive.zip 908742d8f3c6fdd6d1d6316a7b919b5c506474f9551f491aa7335cb4f50bffbd
           "$TK/bin/nvcc.exe" --version | tail -1
           echo "CUDA_NVCC=$(cygpath -w "$TK/bin/nvcc.exe")" >> "$GITHUB_ENV"
           echo "CUDA_TK=$(cygpath -w "$TK")" >> "$GITHUB_ENV"
