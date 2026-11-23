@@ -89,7 +89,7 @@ def _register_impl(ctx) -> None:
     # engine.state module — feeds /health and the doctor "plugin" lamp.
     _state.mark_registered(
         tts="qwen3-tts", stt="local-stt", wake="sherpa (official built-in)",
-        version="0.1.1",
+        version="0.1.3",
     )
 
 

@@ -70,6 +70,24 @@ const LOCALES = {
       settings: '高级设置',
       done: '完成 ✓',
       done_title: '关闭面板',
+      upd_log: '更新日志',
+      upd_update: '一键更新',
+      upd_check: '检查更新',
+      upd_checking: '检查中…',
+      upd_new: '发现新版',
+      upd_latest: '已是最新',
+      upd_loading: '正在从官方仓库拉取更新说明…',
+      upd_load_fail: '更新说明拉取失败（网络不通？），关闭后重开可重试',
+      upd_from: '当前版本',
+      upd_start: '开始更新',
+      upd_applying: '正在下载更新包…',
+      upd_verifying: '正在校验文件…',
+      upd_installing: '正在写入新文件…',
+      upd_done: '已更新 ✓ 完全退出并重开 Hermes 后生效',
+      upd_failed: '更新失败：',
+      upd_deferred: '部分引擎文件正被占用——完全退出并重开 Hermes 后，再点一次「一键更新」即可完成收尾。',
+      upd_retry: '重试',
+      upd_hint: '点开始后自动下载、校验并安装新版，装完完全退出重开 Hermes 即生效。',
       back: '← 返回',
       doctor: '六灯体检',
       lamp: {
@@ -358,6 +376,24 @@ wiz_uninstalled: 'CUDA 引擎已卸载——需要时点下方按钮随时装回
       settings: 'Advanced settings',
       done: 'Done ✓',
       done_title: 'Close panel',
+      upd_log: 'Changelog',
+      upd_update: 'Update now',
+      upd_check: 'Check update',
+      upd_checking: 'Checking…',
+      upd_new: 'New version',
+      upd_latest: 'up to date',
+      upd_loading: 'Fetching the changelog from the official repo…',
+      upd_load_fail: 'Could not load the changelog (offline?). Reopen the panel to retry.',
+      upd_from: 'Current',
+      upd_start: 'Start update',
+      upd_applying: 'Downloading the update…',
+      upd_verifying: 'Verifying files…',
+      upd_installing: 'Installing…',
+      upd_done: 'Updated ✓ fully quit and reopen Hermes to take effect',
+      upd_failed: 'Update failed: ',
+      upd_deferred: 'Some engine files were busy — fully quit and reopen Hermes, then press "Update now" once more to finish.',
+      upd_retry: 'Retry',
+      upd_hint: 'Press start and the new version downloads, verifies and installs itself; fully quit and reopen Hermes to take effect.',
       back: '← Back',
       doctor: 'Doctor checks',
       lamp: {
@@ -906,12 +942,159 @@ function WakeSession({ ctx, t }) {
   ] });
 }
 
+// ── Online updater (client state) ─────────────────────────────────────────
+// Advisory by design: the version probe and the changelog never touch the
+// doctor lamps, and applying an update is always the user's decision. All
+// traffic goes through the dashboard sidecar (same-origin; CORS cannot be
+// relied on for raw github), which probes/fetches with its own fallbacks.
+function useUpdater(ctx) {
+  const [upd, setUpd] = useState(null);      // /update/check verdict
+  const [log, setLog] = useState(null);      // {state:'loading'|'ok'|'err', text?, error?}
+  const [apply, setApply] = useState(null);  // /update/apply progress
+  const applyTimer = useRef(null);
+
+  const [checking, setChecking] = useState(false);
+
+  // checkNow(force): the probe behind the 检查更新 button. force=1 skips the
+  // sidecar cache so the user can retry immediately after turning on a VPN.
+  const checkNow = useCallback((force) => {
+    setChecking(true);
+    ctx.rest('/update/check' + (force ? '?refresh=1' : ''), { timeoutMs: 20000 })
+      .then((d) => { if (d) setUpd(d); })
+      .catch(() => {})                       // silent: a probe failure is nobody's alarm
+      .finally(() => setChecking(false));
+  }, [ctx]);
+
+  useEffect(() => { checkNow(false); }, [checkNow]);
+
+  const loadLog = useCallback((lang) => {
+    setLog({ state: 'loading' });
+    ctx.rest('/update/changelog?lang=' + encodeURIComponent(lang || 'zh'), { timeoutMs: 20000 })
+      .then((d) => setLog(d && d.ok ? { state: 'ok', text: d.text || '' }
+                                    : { state: 'err', error: (d && d.error) || 'offline' }))
+      .catch(() => setLog({ state: 'err', error: 'offline' }));
+  }, [ctx]);
+
+  const stopApplyPoll = useCallback(() => {
+    if (applyTimer.current) { clearInterval(applyTimer.current); applyTimer.current = null; }
+  }, []);
+
+  const pollApply = useCallback(() => {
+    if (applyTimer.current) return;
+    applyTimer.current = setInterval(() => {
+      ctx.rest('/update/apply', { timeoutMs: 8000 })
+        .then((d) => {
+          setApply(d || null);
+          if (d && (d.state === 'done' || d.state === 'error')) stopApplyPoll();
+        })
+        .catch(() => {});
+    }, 1200);
+  }, [ctx, stopApplyPoll]);
+
+  const startApply = useCallback((lang) => {
+    setApply({ state: 'downloading', percent: 0 });
+    pollApply();
+    ctx.rest('/update/apply', { method: 'POST', body: { lang: lang || 'zh' }, timeoutMs: 15000 })
+      .then((d) => { if (d && d.state) setApply(d); })
+      .catch(() => setApply({ state: 'error', error: 'network' }));
+  }, [ctx, pollApply]);
+
+  useEffect(() => () => stopApplyPoll(), [stopApplyPoll]);
+
+  return { upd, checking, checkNow, log, loadLog, apply, setApply, startApply, pollApply, stopApplyPoll };
+}
+
 function QuickPanel({ ctx, t, close }) {
   const { doc, st, err, refresh } = useDoctor(ctx, true);
   const { act, busy: actBusy, switchTo: actSwitch, refresh: refreshAct } = useActivation(ctx, true);
+  // Online updater view state: null = lamps | 'log' | 'apply'.
+  const [uview, setUview] = useState(null);
+  const { upd, checking, checkNow, log, loadLog, apply, setApply, startApply, pollApply, stopApplyPoll } = useUpdater(ctx);
+  const lang = (navigator.language || 'zh').toLowerCase().startsWith('zh') ? 'zh' : 'en';
+  useEffect(() => { if (uview !== 'apply') stopApplyPoll(); }, [uview, stopApplyPoll]);
   const providerOfQuick = (a, k) => { const p = a && a.providers && a.providers[k]; return (!p || p === '(stock default)') ? '' : p; };
   const dormantQuick = (a, k) => { const m = a && a.modules && a.modules[k]; return !!(providerOfQuick(a, k) && m && m.state === 'ready'); };
   const lamps = (doc && doc.lamps) || LAMP_IDS.map((id) => ({ id, ok: false }));
+  // Shared footer for every view: left side = version + update entry (lamps
+  // view) or back (alternate views); right side = the explicit exit (done).
+  const sharedFooter = jsxs('div', { className: 'flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-border', children: [
+    uview
+      ? jsx(Button, { size: 'xs', variant: 'ghost', onClick: () => setUview(null), children: t('yache.back') })
+      : jsxs('div', { className: 'flex flex-wrap items-center gap-1.5', children: [
+          jsx('span', { className: 'font-mono text-[10px] text-muted-foreground/70',
+                        children: 'v' + ((upd && upd.current) || '?') }),
+          upd && upd.available
+            ? jsx('span', { className: 'text-[10px] font-medium', style: { color: '#fbbf24' },
+                            children: t('yache.upd_new') + ' v' + upd.latest })
+            : upd && upd.ok && !checking
+              ? jsx('span', { className: 'text-[10px] text-muted-foreground/60', children: t('yache.upd_latest') })
+              : null,
+          jsx(Button, { size: 'xs', variant: 'ghost',
+                        onClick: () => { setUview('log'); if (!log) loadLog(lang); },
+                        children: t('yache.upd_log') }),
+          upd && upd.available
+            ? jsx(Button, { size: 'xs', variant: 'outline',
+                            style: { color: '#fbbf24', borderColor: '#fbbf24', fontWeight: 600 },
+                            onClick: () => { setUview('apply'); pollApply(); },
+                            children: t('yache.upd_update') })
+            : jsx(Button, { size: 'xs', variant: 'ghost', disabled: checking,
+                            onClick: () => checkNow(true),
+                            children: checking ? t('yache.upd_checking') : t('yache.upd_check') }),
+        ] }),
+    jsx(Button, { size: 'xs', variant: 'outline', title: t('yache.done_title'),
+                  onClick: close, children: t('yache.done') }),
+  ] });
+
+  // Alternate views (changelog / one-click update) reuse the same popover
+  // shell; the shared footer below swaps its left side for a back button.
+  if (uview === 'log') {
+    return jsxs('div', { className: 'flex flex-col gap-1 p-1 w-[440px]', children: [
+      !log || log.state === 'loading'
+        ? jsx('div', { className: 'py-8 text-center text-[11px] text-muted-foreground', children: t('yache.upd_loading') })
+        : log.state === 'err'
+          ? jsx('div', { className: 'py-8 text-center text-[11px] text-rose-500', children: t('yache.upd_load_fail') })
+          : jsx('pre', { className: 'max-h-[420px] overflow-y-auto whitespace-pre-wrap break-words rounded bg-muted/40 p-2 font-sans text-[11px] leading-relaxed text-foreground/90', children: log.text }),
+      sharedFooter,
+    ] });
+  }
+  if (uview === 'apply') {
+    const busy = apply && (apply.state === 'downloading' || apply.state === 'verifying' || apply.state === 'installing');
+    return jsxs('div', { className: 'flex flex-col gap-2 p-1 w-[440px]', children: [
+      /* four states: done | error | busy(progress) | idle(start) */
+      jsxs('div', { className: 'flex items-center gap-2 text-[11px]', children: [
+        jsx('span', { className: 'text-muted-foreground', children: t('yache.upd_from') }),
+        jsx('span', { className: 'font-mono', children: 'v' + ((upd && upd.current) || '?') }),
+        jsx('span', { className: 'text-muted-foreground', children: '\u2192' }),
+        jsx('span', { className: 'font-mono font-medium', style: { color: '#fbbf24' }, children: 'v' + ((upd && upd.latest) || '?') }),
+      ] }),
+      apply && apply.state === 'done'
+        ? jsxs('div', { className: 'flex flex-col gap-1 py-4', children: [
+            jsx('div', { className: 'text-[11px] font-medium text-emerald-500', children: t('yache.upd_done') }),
+            apply.deferred && apply.deferred.length
+              ? jsx('div', { className: 'text-[10px] text-amber-500', children: t('yache.upd_deferred') })
+              : null,
+          ] })
+        : apply && apply.state === 'error'
+          ? jsxs('div', { className: 'flex flex-col gap-2 py-4', children: [
+              jsx('div', { className: 'text-[11px] text-rose-500', children: t('yache.upd_failed') + (apply.error || 'error') }),
+              jsx(Button, { size: 'xs', variant: 'outline', style: { alignSelf: 'flex-start' },
+                            onClick: () => startApply(lang), children: t('yache.upd_retry') }),
+            ] })
+          : busy
+            ? jsxs('div', { className: 'flex flex-col gap-2 py-4', children: [
+                jsx('div', { className: 'text-[11px] text-muted-foreground', children: t('yache.upd_' + apply.state) }),
+                jsx('div', { className: 'h-1.5 w-full overflow-hidden rounded bg-muted', children:
+                  jsx('div', { className: 'h-full rounded',
+                               style: { width: ((apply && apply.percent) || 0) + '%', background: '#fbbf24', transition: 'width .3s' } }) }),
+              ] })
+            : jsxs('div', { className: 'flex flex-col gap-2 py-4', children: [
+                jsx('div', { className: 'text-[11px] text-muted-foreground', children: t('yache.upd_hint') }),
+                jsx(Button, { size: 'xs', style: { alignSelf: 'flex-start', background: '#fbbf24', color: '#1c1917', fontWeight: 600 },
+                              onClick: () => startApply(lang), children: t('yache.upd_start') }),
+              ] }),
+      sharedFooter,
+    ] });
+  }
   return jsxs('div', { className: 'flex flex-col gap-1 p-1 w-[360px]', children: [
     jsxs('div', { className: 'flex items-center justify-between px-1', children: [
       jsxs('div', { className: 'flex items-center gap-1.5 text-sm font-semibold', children: [
@@ -979,9 +1162,7 @@ function QuickPanel({ ctx, t, close }) {
         jsx('span', { className: 'font-mono', children: st.recommended.tier }),
       ] }) : null,
     ] }) : null,
-    jsx('div', { className: 'flex justify-end pt-1 border-t border-border', children:
-      jsx(Button, { size: 'xs', variant: 'outline', title: t('yache.done_title'),
-                    onClick: close, children: t('yache.done') }) }),
+    sharedFooter,
   ] });
 }
 

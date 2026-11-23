@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.3 — online updater (2026-11-23)
+
+**Update yourself from the panel — no browser, no reinstall.**
+
+- The panel footer now shows the installed version and a **Check update**
+  button. When a newer release exists it turns into an amber **Update now**
+  button beside a "New version" hint — one click downloads the release,
+  verifies its SHA-256 and installs every file. Fully quit and reopen Hermes
+  to load the new code; updates are never forced.
+- **Changelog** opens the full release history inside the panel, fetched from
+  the official repo; offline it falls back to the bundled copy.
+- Before replacing anything, every old file about to be overwritten is
+  archived into `HERMES_HOME/backups/yache-update-<timestamp>.zip`.
+- Version probes travel raw.githubusercontent.com → jsDelivr → gh-proxy with
+  automatic fallback; a failed probe stays silent and never disturbs the
+  doctor lamps.
+
 ## 0.1.2 — desktop-half packaging fix (2026-11-23)
 
 - The plugin zip now ships `desktop/plugin.js`, the desktop-half entry that

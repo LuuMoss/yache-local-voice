@@ -56,6 +56,15 @@ try:
 except Exception:  # pragma: no cover
     _dl = None  # type: ignore
 
+# Online updater (dashboard/update.py): version probe + changelog reader +
+# one-click apply.  Same import posture as the download wizard: if the
+# module ever fails to import, the update routes answer 503 and the panel
+# simply hides the update row — health lights stay untouched.
+try:
+    import update as _up  # noqa: E402
+except Exception:  # pragma: no cover
+    _up = None  # type: ignore
+
 router = APIRouter()
 
 _CREATE_NO_WINDOW = 0x08000000  # GUI host: nvidia-smi/stdout dies without it
@@ -107,6 +116,49 @@ def ui_debug(payload: Optional[Dict[str, Any]] = None) -> Dict[str, bool]:
     except Exception:  # noqa: BLE001
         pass
     return {"ok": True}
+
+
+@router.get("/update/check")
+def update_check(refresh: bool = False) -> Dict[str, Any]:
+    """Advisory version probe (never part of the health lights)."""
+    if _up is None:
+        return {"ok": False, "error": "updater unavailable"}
+    try:
+        return _up.check(force=refresh)
+    except Exception as exc:  # noqa: BLE001 — probe is cosmetic, never 5xx
+        _log.debug("update check failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
+@router.get("/update/changelog")
+def update_changelog(lang: str = "zh") -> Dict[str, Any]:
+    if _up is None:
+        return {"ok": False, "text": "", "error": "updater unavailable"}
+    try:
+        return _up.changelog(lang)
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("changelog fetch failed: %s", exc)
+        return {"ok": False, "text": "", "error": str(exc)}
+
+
+class UpdateApplyBody(BaseModel):
+    lang: str = Field(default="zh", description="changelog / message language")
+
+
+@router.post("/update/apply")
+def update_apply(body: Optional[UpdateApplyBody] = None) -> Dict[str, Any]:
+    """One-click update: download -> cross-checked sha -> install.  The
+    user decides; we never force.  Progress via GET /update/apply."""
+    if _up is None:
+        raise HTTPException(status_code=503, detail="updater unavailable")
+    return _up.apply_async((body or UpdateApplyBody()).lang)
+
+
+@router.get("/update/apply")
+def update_apply_status() -> Dict[str, Any]:
+    if _up is None:
+        return {"state": "idle"}
+    return _up.apply_status()
 
 
 @router.get("/status")
