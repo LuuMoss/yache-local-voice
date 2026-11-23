@@ -254,11 +254,11 @@ jobs:
             cp "$cuda_bin/$f" "dist-cuda/$f"
           done
           python - <<'PY'
-          import zipfile
+          import os, zipfile
           names = ['qwen.dll','ggml-cuda.dll','ggml-base.dll','ggml-cpu.dll','ggml.dll',
                    'cudart64_12.dll','cublas64_12.dll','cublasLt64_12.dll']
           with zipfile.ZipFile('dist-cuda-build/yache-cuda-windows-x64.zip','w',zipfile.ZIP_DEFLATED) as z:
-              for n in names: z.write(n, n, compress_type=zipfile.ZIP_DEFLATED)
+              for n in names: z.write(os.path.join('dist-cuda', n), n, compress_type=zipfile.ZIP_DEFLATED)
           PY
           python - <<'PY'
           import zipfile
