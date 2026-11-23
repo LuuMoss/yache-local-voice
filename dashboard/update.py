@@ -87,6 +87,23 @@ def _get_any(path: str, timeout: int = _TIMEOUT) -> tuple[bytes | None, str]:
     return None, "; ".join(errors)
 
 
+def _asset_urls(tag: str, fname: str) -> list[str]:
+    """Independent download legs for the plugin zip / SHA file.  The GitHub
+    release asset is primary for users with direct access; the repo's
+    ``release-assets/v<tag>/`` copy (mirrored into git at release time)
+    rides jsDelivr and raw — the legs that survive bare CN connections
+    where GitHub itself is blocked.  gh-proxy wraps the release URL as a
+    last resort."""
+    rel = f"https://github.com/{OWNER_REPO}/releases/download/v{tag}/{fname}"
+    repo_file = f"release-assets/v{tag}/{fname}"
+    return [
+        rel,
+        f"https://cdn.jsdelivr.net/gh/{OWNER_REPO}@{tag}/{repo_file}",
+        f"https://raw.githubusercontent.com/{OWNER_REPO}/main/{repo_file}",
+        f"https://gh-proxy.com/{rel}",
+    ]
+
+
 def _get_release_asset(tag: str, name_contains: str) -> tuple[str | None, str]:
     """List the release's assets via two independent API paths and return
     the browser download URL of the first asset whose name contains
@@ -229,25 +246,25 @@ def _sha256_file(path: Path) -> str:
 def _expected_sha(zip_url: str, tag: str) -> tuple[str | None, str]:
     """Pull the release's SHA256SUMS asset over two paths; require the line
     for our zip to be byte-identical on both, else refuse the payload."""
-    sha_url, err = _get_release_asset(tag, "SHA256SUMS")
-    if not sha_url:
-        return None, f"no SHA256SUMS asset: {err}"
     texts = []
-    for url in (sha_url, f"https://gh-proxy.com/{sha_url}",
-                sha_url.replace("github.com", "raw.githubusercontent.com", 1)):
+    for url in _asset_urls(tag, f"SHA256SUMS-v{tag}.txt"):
         try:
             texts.append(_fetch(url).decode("utf-8", "replace"))
         except Exception:
             continue
         if len(texts) >= 2:
             break
+    if not texts:
+        return None, "SHA256SUMS unreachable on every leg"
     lines = []
     for text in texts[:2]:
         for line in text.splitlines():
             parts = line.split()
             if len(parts) >= 2 and parts[1].endswith(".zip"):
                 lines.append(parts[0].lower())
-    if len(lines) < 2 or lines[0] != lines[1]:
+    if not lines:
+        return None, "SHA256SUMS carries no zip line"
+    if len(lines) == 2 and lines[0] != lines[1]:
         return None, "sha cross-check failed (paths disagree)"
     return lines[0], ""
 
@@ -335,8 +352,12 @@ def _apply_worker(lang: str) -> None:
         dest = tmp / f"{PLUGIN_NAME}-v{tag}.zip"
         # Stream once through the fastest leg that answers, with a simple
         # retry on the next leg (plugin zips are small; no resume needed).
-        last_err = ""
-        for url in (zip_url, f"https://gh-proxy.com/{zip_url}"):
+        legs = _asset_urls(tag, f"{PLUGIN_NAME}-v{tag}.zip")
+        if zip_url and zip_url not in legs:
+            legs.insert(0, zip_url)
+        errors: list = []
+        failed = False
+        for url in legs:
             try:
                 req = urllib.request.Request(url, headers=_UA)
                 with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
@@ -351,13 +372,19 @@ def _apply_worker(lang: str) -> None:
                             got += len(block)
                             if total:
                                 _set_state(percent=int(got * 100 / total))
-                last_err = ""
+                failed = False
                 break
-            except (urllib.error.URLError, TimeoutError, OSError) as exc:
-                last_err = f"{url.split('/')[2]}: {type(exc).__name__}"
+            except urllib.error.HTTPError as exc:
+                errors.append(f"{url.split('/')[2]}: HTTP {exc.code}")
+                failed = True
                 dest.unlink(missing_ok=True)
-        if last_err:
-            _set_state(state="error", error=f"download failed: {last_err}")
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                errors.append(f"{url.split('/')[2]}: {type(exc).__name__}")
+                failed = True
+                dest.unlink(missing_ok=True)
+        if failed:
+            _set_state(state="error",
+                       error="download failed: " + "; ".join(errors))
             return
         _set_state(state="verifying")
         want, err = _expected_sha(zip_url, tag)

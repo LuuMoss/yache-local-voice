@@ -5,5 +5,6 @@ logs/
 *.bak
 .DS_Store
 
-# GitHub Release 资产本地副本（518MB GPU 包等，只进 Release 不进 git）
-release-assets/
+# GitHub Release 资产本地副本。插件 zip + SHA256SUMS 进 git（小文件，
+# 在线更新器靠它们在 jsDelivr/raw 上裸连下载）；GPU 大包只进 Release。
+release-assets/v*/yache-cuda-accel-*.zip
