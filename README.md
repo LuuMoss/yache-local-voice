@@ -86,6 +86,30 @@ The one-glance status bar, the console doctor screen and the four settings pages
 
 *STT tab: one-click build of the plugin-owned Python environment, offline transcription of files or microphone.*
 
+## Build provenance (supply-chain trust)
+
+Every binary Yache Voice runs on your machine is compiled from source
+**in this repository** — there are no black-box binaries:
+
+- **CPU engine** — the four Qwen3-TTS/ggml DLLs under
+  `vendor/qwentts_cpp/lib/` are built from in-tree source: the exact
+  upstream `qwentts.cpp` sources (pinned at its 6fae9291 commit, including
+  the ggml submodule) live in `third_party/qwentts.cpp/`, and GitHub
+  Actions (`.github/workflows/build-engine.yml`) rebuilds them on every
+  `engine-v*` tag with a post-build `qt_version` handshake self-check.
+- **CUDA accelerator pack** — the 45-DLL pack (CUDA 12.4.1 + cuBLAS
+  runtimes, cubins for sm_86/89/90 plus PTX for future GPUs) is compiled
+  by the CI `build-cuda-pack` job from the same in-tree sources. It ships
+  as a *versioned* Release asset, and its SHA-256 and exact byte size are
+  pinned in the plugin source, so the download is verified byte-for-byte
+  before anything is loaded.
+- **Verify it yourself** — both builds publish
+  [SLSA build provenance](https://slsa.dev) from their Actions runs:
+
+  ```bash
+  gh attestation verify <file> --repo LuuMoss/yache-local-voice
+  ```
+
 ## Disclosure (catalog rule 13)
 
 - **Config keys written by the dashboard panel** (through the official
@@ -187,8 +211,9 @@ hook would make it obsolete.
 
 ## Version history
 
-- **0.1.1** — engine DLLs rebuilt from source in this repository
-  (`third_party/` + CI + SLSA attestation); the vendored `libsndfile`
-  payload was dropped in favour of the host's `soundfile`. See
-  `CHANGELOG.md`.
+- **0.1.1** — both engine binary sets (CPU DLLs and the 45-DLL CUDA
+  accelerator pack) rebuilt from source in this repository's CI with SLSA
+  attestation; the CUDA pack now ships as this release's versioned asset
+  with its SHA-256 pinned in source; the vendored `libsndfile` payload was
+  dropped in favour of the host's `soundfile`. See `CHANGELOG.md`.
 - **0.1.0** (2026-11-19) — first public release: local voice-cloning TTS (Qwen3-TTS 1.7B), self-managed STT environment with on-demand install and weights download wizard, wake word on the official built-in sherpa-onnx KWS engine, and a one-click CUDA accelerator pack shipped as GitHub Release asset `cuda-pack-v1`.

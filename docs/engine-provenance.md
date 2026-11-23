@@ -81,3 +81,11 @@ gh attestation verify yache-cuda-windows-x64.zip \
 `dashboard/download.py` pins this asset by release tag, SHA-256 and
 exact byte size in source, so a tampered relay cannot sneak a different
 payload through.
+
+As of 0.1.1 the pack graduated from a moving tag to a **versioned
+Release asset**: every plugin release ships its pack alongside it.  The
+v0.1.1 pin is Actions run 45101468558 — 768,440,698 bytes, SHA-256
+`1ca320a5…1d36` — and the pack now embeds engine kernels for sm_86,
+sm_89 and sm_90 plus PTX, so RTX 30/40/50-class cards share one pack.
+Packs from older tags stay downloadable and keep working, but fresh
+installs always get the versioned, attested pack.

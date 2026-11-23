@@ -1,6 +1,6 @@
 {
   "name": "yache-local-voice",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Yache Voice — local full voice pipeline (TTS / STT; wake word via the host's official built-in engine) status, doctor checks and test playback.",
   "api": "api.py"
 }

@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.1.1 — CI-built engine, supply chain closed (2026-11-23)
+
+- Both engine binary sets are now compiled from source **in this
+  repository's GitHub Actions**, with SLSA build provenance:
+  - CPU: the four Qwen3-TTS/ggml DLLs (`third_party/qwentts.cpp` pinned at
+    6fae9291) are rebuilt by `.github/workflows/build-engine.yml` on every
+    `engine-v*` tag and attested via `actions/attest-build-provenance`.
+  - CUDA: the full 45-DLL accelerator pack (CUDA 12.4.1, cubins for
+    sm_86/89/90 + PTX) is rebuilt by the `build-cuda-pack` job with the
+    same attestation, and ships as the versioned Release asset
+    `yache-cuda-windows-x64.zip` of this release.
+- The CUDA pack download URL moved from the moving `cuda-pack-v1` tag to
+  this release's versioned asset (`releases/download/v0.1.1/…`), and the
+  pinned SHA-256 now matches the CI-built pack byte for byte; the old
+  `cuda-pack-v1` release stays available for installs made before 0.1.1.
+- Worker/child processes no longer inherit provider secrets: the engine
+  launcher strips every `*KEY*/*TOKEN*/*SECRET*/*PASSWORD*`-style variable
+  from the environment it hands to compute children.
+- The plugin-catalog entry now registers `attested_binaries`, and the
+  unneeded `catalog_self_updater_allowlist.json` row was dropped.
+- Documentation: README gained a Build provenance section documenting the
+  CI chain end to end; `docs/engine-provenance.md` now records the v0.1.1
+  pack pin (run 45101468558, multi-arch kernels) and the versioned-asset
+  policy.
+
 ## 0.1.0 — first public release (2026-11-19; rebuilt 2026-11-22 after catalog review #158052)
 
 ### Review rebuild (2026-11-22)

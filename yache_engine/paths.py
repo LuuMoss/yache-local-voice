@@ -171,7 +171,27 @@ def worker_env(python_path: Path | None = None) -> dict:
     if py.lower() != str(Path(sys.executable)).lower():
         env.pop("PYTHONPATH", None)
         env.pop("PYTHONHOME", None)
+    # Secrets never belong in a compute child (catalog review, 2026-11-23).
+    # The worker talks to its parent over stdio only, so every provider
+    # credential in the host env is dead weight it could leak; plumbing
+    # (PATH, SYSTEMROOT, TEMP, HOME, HF_HOME) must stay or the engine
+    # cannot even load its DLLs.
+    for k in [k for k in env if _is_secret_var(k)]:
+        env.pop(k, None)
     return env
+
+
+_SECRET_PREFIXES = (
+    "OPENAI_", "ANTHROPIC_", "GOOGLE_", "GEMINI_", "XAI_", "AWS_",
+    "AZURE_", "DEEPSEEK_", "MISTRAL_", "GROQ_", "OPENROUTER_",
+    "ELEVENLABS_", "MINIMAX_",
+)
+_SECRET_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL")
+
+
+def _is_secret_var(name: str) -> bool:
+    n = name.upper()
+    return n.startswith(_SECRET_PREFIXES) or any(m in n for m in _SECRET_MARKERS)
 
 
 def dll_search_dir(base: Path | None = None) -> Path:

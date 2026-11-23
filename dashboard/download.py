@@ -67,10 +67,10 @@ HF_ENDPOINTS = ["https://huggingface.co", "https://hf-mirror.com"]
 # (.github/workflows/build-engine.yml, build-cuda-pack job).  Update both
 # constants together whenever the pack is rebuilt.
 GPU_REPO = "LuuMoss/yache-local-voice"
-GPU_TAG = "v0.1.0"
+GPU_TAG = "v0.1.1"
 GPU_ASSET = "yache-cuda-windows-x64.zip"
-GPU_SHA256 = "f5777fd18c1489f4648b3053bf5ad6d14b760d6d919a6b50bdbc4dd34ac7a435"
-GPU_BYTES = 543568511
+GPU_SHA256 = "1ca320a57126c62c50813c2f752b2855066ace244cb10835d36a4ed3f85b1d36"
+GPU_BYTES = 768440698
 GPU_META = "metadata.json"   # kept in the release for bookkeeping only
 GPU_ENDPOINTS = ["https://github.com"]
 GPU_GITHUB = GPU_ENDPOINTS[0]      # the ramp-up-prone mainline (see pick)
