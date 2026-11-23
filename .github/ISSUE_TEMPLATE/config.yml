@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Questions & install help
+    url: https://github.com/LuuMoss/yache-local-voice/discussions/categories/q-a
+    about: '"How do I...?" style questions belong in Q&A discussions, not issues.'
+  - name: Ideas
+    url: https://github.com/LuuMoss/yache-local-voice/discussions/categories/ideas
+    about: "Loose ideas and wishes are discussed openly first."
+  - name: Security reports (private)
+    url: https://github.com/LuuMoss/yache-local-voice/security/advisories/new
+    about: Please report vulnerabilities privately — see SECURITY.md.

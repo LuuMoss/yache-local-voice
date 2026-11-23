@@ -1,0 +1,24 @@
+name: Feature request
+description: An idea to make the plugin better
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ideas are also welcome in
+        [Discussions -> Ideas](../discussions/categories/ideas) — use this
+        issue form if you have something concrete.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Tell us the story, not just the feature.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: How would you like it to work?
+      description: Rough behavior, UI, defaults — whatever you already pictured.
+    validations:
+      required: true
