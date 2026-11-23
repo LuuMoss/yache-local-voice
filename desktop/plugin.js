@@ -123,6 +123,15 @@ const LOCALES = {
       wp_now: (kind, st) => `当前底层：${kind} · ${st}`,
       wp_kind_zh: '拼音模型（中文）',
       wp_kind_en: '拼写模型（英文）',
+      wp_model_zh: '中文唤醒模型（wenetspeech，约 31 MB）',
+      wp_model_en: '英文唤醒模型（gigaspeech，约 17 MB）',
+      wp_model_fetching: (m) => `正在自动下载${m}（官方源 + 免费镜像测速选路，进度可断点续传）…`,
+      wp_model_extracting: '唤醒模型下载完毕 —— 正在解包部署…',
+      wp_model_ready: '唤醒模型已就绪，打开上方"唤醒开关"就能用这个词唤醒我 ✨',
+      wp_model_failed: '唤醒模型下载失败（进度已保留，可重试）：',
+      wp_model_retry: '重试',
+      wp_model_missing: '这个唤醒词所需的模型还没在这台机器上——',
+      wp_model_fetch: '立即下载模型',
       wp_kind_unknown: '未知',
       wp_armed: '监听中',
       wp_idle: '未监听',
@@ -260,7 +269,7 @@ wiz_uninstalled: 'CUDA 引擎已卸载——需要时点下方按钮随时装回
       soon_clone: '音色管理与「新建克隆」（参考音频＋文本，保存即真机合成验证）即将上线。',
       clone_new: '新建克隆',
       voice_unset: '音色未设置',
-      models_missing: (list) => '缺少模型文件：' + list + '（下载地址见插件目录 README）',
+      models_missing: (list) => '提示：目录里还没有 ' + list + '。只做克隆音色不必下载它们；想使用内置音色（自定义语音模型）或用描述词生成克隆音色（描述克隆语音模型）时，下载放进这个目录就好（下载地址见插件 README）',
       tokenizer_missing: 'Tokenizer 缺失（models/ 下缺 tokenizer.json）',
       mdl_title: '模型目录',
       mdl_hint: '告诉雅澈模型放在哪里：选包含 qwen-talker-1.7b-*.gguf 的文件夹（选外层目录或 models 子目录都可以，会自动识别）。「读取」会真实扫描该目录，扫描通过才会生效；引擎每句话都重读目录，切换即时生效、无需重启。',
@@ -402,6 +411,15 @@ wiz_uninstalled: 'CUDA 引擎已卸载——需要时点下方按钮随时装回
       wp_now: (kind, st) => `Engine now: ${kind} · ${st}`,
       wp_kind_zh: 'pinyin model (Chinese)',
       wp_kind_en: 'spelled model (English)',
+      wp_model_zh: 'the Chinese wake model (wenetspeech, ~31 MB)',
+      wp_model_en: 'the English wake model (gigaspeech, ~17 MB)',
+      wp_model_fetching: (m) => `Auto-fetching ${m} (official source + free mirrors probed for the fastest leg; resumes if interrupted)…`,
+      wp_model_extracting: 'Wake model downloaded — unpacking into place…',
+      wp_model_ready: 'Wake model is ready — flip the wake switch above and say the word ✨',
+      wp_model_failed: 'Wake-model fetch failed (progress kept, you can retry): ',
+      wp_model_retry: 'Retry',
+      wp_model_missing: 'This wake word needs a model this machine does not have yet —',
+      wp_model_fetch: 'Fetch model now',
       wp_kind_unknown: 'unknown',
       wp_armed: 'armed',
       wp_idle: 'idle',
@@ -539,7 +557,7 @@ wiz_uninstalled: 'CUDA engine uninstalled — re-install it anytime with the but
       soon_clone: 'Voice management and “New clone” (reference audio + text, saved only after a real synthesis check) arrive next.',
       clone_new: 'New clone',
       voice_unset: 'no voice set',
-      models_missing: (list) => 'Missing model files: ' + list + ' (download links in the plugin README)',
+      models_missing: (list) => 'Note: this folder does not have ' + list + ' yet. Voice cloning works without them — download the custom-voice model (built-in voices) and the voice-design model (prompt-described voices) only if you want those features (links in the plugin README)',
       tokenizer_missing: 'Tokenizer missing (models/tokenizer.json)',
       mdl_title: 'Model directory',
       mdl_hint: 'Tell Yache where the models live: Pick the folder containing qwen-talker-1.7b-*.gguf (the parent folder or the models/ subfolder both work). "Read" really reads the folder and only applies on success; the engine re-reads this per utterance, so switching is instant — no restart needed.',
@@ -1712,6 +1730,56 @@ function WakePhrase({ ctx, t }) {
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState('');
+  // Save-bridge model pipeline view (owner, 2026-11-20): mk is the wake
+  // KWS-model state machine ('' | downloading | ready | failed), mp the
+  // live job progress (same json the wizard bars ride), mf the gap found
+  // on load when the saved phrase needs a model this machine lacks.
+  const [mk, setMk] = useState('');
+  const [mp, setMp] = useState(null);
+  const [mf, setMf] = useState(false);
+  // a job may already run from an earlier save/panel visit — ride it
+  useEffect(() => {
+    let live = true;
+    ctx.rest('/wake-model/status', { timeoutMs: 5000 })
+      .then((r) => {
+        if (!live || !r || !r.state || r.state === 'idle') return;
+        if (r.state === 'done') setMk('ready');
+        else if (r.state === 'error' || r.state === 'interrupted' || r.state === 'cancelled') { setMk('failed'); setMp(r); }
+        else { setMk('downloading'); setMp(r); }
+      })
+      .catch(() => { /* transient */ });
+    return () => { live = false; };
+  }, [ctx]);
+  // poll while the job runs; done lands as a green line, no toasts
+  useEffect(() => {
+    if (mk !== 'downloading') return undefined;
+    let live = true;
+    const tick = () => {
+      ctx.rest('/wake-model/status', { timeoutMs: 5000 })
+        .then((r) => {
+          if (!live || !r || !r.state || r.state === 'idle') return;
+          setMp(r);
+          if (r.state === 'done') setMk('ready');
+          else if (r.state === 'error' || r.state === 'interrupted' || r.state === 'cancelled') setMk('failed');
+        })
+        .catch(() => { /* transient; keep the bar */ });
+    };
+    tick();
+    const h = setInterval(tick, 1200);
+    return () => { live = false; clearInterval(h); };
+  }, [ctx, mk]);
+  const fetchModel = useCallback(async () => {
+    setBusy(true);
+    setNote('');
+    try {
+      const r = await ctx.rest('/wake-model/retry', { method: 'POST', timeoutMs: 20000 });
+      if (r && r.model === 'downloading') { setMf(false); setMp(null); setMk('downloading'); }
+      else if (r && r.model === 'ready') { setMf(false); setMk('ready'); }
+      else setNote(t('yache.wp_rejected') + ' ' + String((r && r.detail) || ''));
+    } catch (err) {
+      setNote(t('yache.wp_rejected') + ' ' + String((err && err.message) || err));
+    } finally { setBusy(false); }
+  }, [ctx, t]);
 
   useEffect(() => {
     let live = true;
@@ -1720,6 +1788,8 @@ function WakePhrase({ ctx, t }) {
         if (!live || !d || d.ok === false) return;
         setCur(d);
         setDraft((v) => (v === '' ? String(d.phrase || '') : v));
+        // fresh-install gap: the saved phrase needs a model we lack
+        setMf(Boolean(d.model_lang) && d.model_ready === false);
       })
       .catch(() => { /* empty first paint; the save path surfaces errors */ });
     return () => { live = false; };
@@ -1740,6 +1810,10 @@ function WakePhrase({ ctx, t }) {
           : t('yache.wp_saved_auto'))
           + (r.model_changed ? t('yache.wp_model_switched') : '')
           + t('yache.wp_name_sync'));
+        // save-bridge model pipeline: ride the progress bar / green line
+        if (r.model === 'downloading') { setMf(false); setMp(null); setMk('downloading'); }
+        else if (r.model === 'ready') { setMf(false); setMk('ready'); }
+        else if (r.model === 'error') setMk('failed');
         try {
           queryClient.invalidateQueries({ queryKey: ['hermes-config-record'] });
         } catch { /* best-effort host config-cache refresh */ }
@@ -1753,7 +1827,14 @@ function WakePhrase({ ctx, t }) {
     }
   }, [ctx, draft, busy, t]);
 
-  const dirty = !!draft.trim() && (!cur || draft.trim() !== String(cur.phrase || ''));
+  // Owner relaxation (2026-11-20): re-saving the SAME phrase is a valid
+  // manual re-trigger of the model bridge — it is idempotent end-to-end
+  // (the backend checks the on-disk model first and skips the download
+  // entirely when the files are already there, only re-pointing config),
+  // so the Save button's only rule is "non-empty draft". No more
+  // same-as-current greying, which used to trap users after a failed
+  // save that had already persisted the phrase.
+  const dirty = !!draft.trim();
   const fail = !!note && note.startsWith(t('yache.wp_rejected'));
   const kind = !cur ? t('yache.wp_kind_unknown')
     : cur.model_kind === 'zh' ? t('yache.wp_kind_zh')
@@ -1772,6 +1853,34 @@ function WakePhrase({ ctx, t }) {
       jsx(Button, { size: 'xs', disabled: busy || !dirty, onClick: () => void save(),
         children: busy ? t('yache.wp_verifying') : t('yache.wp_save') }),
     ] }),
+    // ---- wake-model bridge strip (owner, 2026-11-20): progress bar /
+    // green line / retry — amber palette, rides the shared job ledger,
+    // the backend filters it to kind=wake so other jobs never bleed in ----
+    mk === 'downloading' ? jsxs('div', { className: 'mt-1 rounded-md border border-amber-400/50 bg-amber-400/10 p-2', children: [
+      jsx('div', { className: 'text-[11px] font-medium text-amber-500',
+        children: (mp && mp.state === 'extracting')
+          ? t('yache.wp_model_extracting')
+          : t('yache.wp_model_fetching',
+              (mp && mp.lang === 'zh') ? t('yache.wp_model_zh') : t('yache.wp_model_en')) }),
+      mp && mp.state !== 'extracting' ? jsx('div', { className: 'mt-1 text-[10px] text-amber-500/80',
+        children: `${mp.pct != null ? Math.round(mp.pct) : 0}%${mp.mbps ? ` · ${mp.mbps.toFixed(2)} MB/s` : ''}${mp.eta_s != null ? (mp.eta_s >= 60 ? ` · ${Math.floor(mp.eta_s / 60)}min${Math.round(mp.eta_s % 60)}s` : ` · ${Math.round(mp.eta_s)}s`) : ''}` }) : null,
+      jsx('div', { className: 'mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-amber-400/20',
+        children: jsx('div', { className: 'h-full rounded-full bg-amber-400 transition-[width]',
+          style: { width: `${Math.max(2, Math.min(100, (mp && mp.pct) || 2))}%` } }) }),
+    ] }) : null,
+    mk === 'ready' ? jsx('p', { className: 'mt-1 text-[11px] text-emerald-500', children: t('yache.wp_model_ready') }) : null,
+    mk === 'failed' ? jsxs('div', { className: 'mt-1 flex items-center gap-2', children: [
+      jsx('span', { className: 'min-w-0 flex-1 truncate text-[11px] text-rose-500',
+        title: (mp && mp.note) || '',
+        children: t('yache.wp_model_failed') + String((mp && mp.note) || '') }),
+      jsx(Button, { size: 'xs', variant: 'outline', disabled: busy, onClick: () => void fetchModel(),
+        children: t('yache.wp_model_retry') }),
+    ] }) : null,
+    mf && mk === '' ? jsxs('div', { className: 'mt-1 flex items-center gap-2', children: [
+      jsx('span', { className: 'min-w-0 flex-1 text-[11px] text-amber-500', children: t('yache.wp_model_missing') }),
+      jsx(Button, { size: 'xs', variant: 'outline', disabled: busy, onClick: () => void fetchModel(),
+        children: t('yache.wp_model_fetch') }),
+    ] }) : null,
     note ? jsx('p', { className: 'mt-1 whitespace-pre-wrap text-[11px] '
       + (fail ? 'text-rose-500' : 'text-muted-foreground'), children: note }) : null,
   ] });

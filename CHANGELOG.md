@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.2 — desktop-half packaging fix (2026-11-23)
+
+- The plugin zip now ships `desktop/plugin.js`, the desktop-half entry that
+   Hermes Desktop's plugin loader reconciles into its hot-load scan root after
+   an install. 0.1.1 shipped without it, so a fresh install showed no status-bar
+   icon (a manual hot-load copy on the dev machine masked this).
+- `desktop/plugin.js` is now a byte-identical twin of the root `plugin.js`
+   (0.1.0 had shipped two divergent builds of this file).
+
 ## 0.1.1 — CI-built engine, supply chain closed (2026-11-23)
 
 - Both engine binary sets are now compiled from source **in this

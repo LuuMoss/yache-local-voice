@@ -1,5 +1,5 @@
 name: yache-local-voice
-version: 0.1.1
+version: 0.1.2
 requires_hermes: '>=0.22.5'
 author: "Xiaoya / Moss"
 description: "Yache Voice — full local voice pipeline for Hermes Desktop: Qwen3-TTS 1.7B streaming TTS (zero-disk, VRAM released after playback) + faster-whisper STT inside a plugin-owned Python environment the panel installs in one click (survives official upgrades) + wake word via the official built-in sherpa-onnx KWS engine. Fully offline; missing engines return control to the host with clear diagnostics."
